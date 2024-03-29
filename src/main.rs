@@ -14,7 +14,8 @@ pub mod connection_handler;
 pub mod protocol;
 
 fn main() {
-    let tcp_listener = TcpListener::bind(format!("{BIND_IP}:{PORT}")).unwrap();
+    let tcp_listener =
+        TcpListener::bind(format!("{BIND_IP}:{PORT}")).expect("Failed to bind TcpListener.");
 
     // TODO: Use a thread pool.
     for stream in tcp_listener.incoming() {
