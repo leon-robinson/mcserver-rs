@@ -11,6 +11,7 @@ pub const _CONNECTION_STREAM_THREAD_POOL_SIZE: i32 = 4;
 
 pub mod byte_helpers;
 pub mod connection_handler;
+pub mod protocol;
 
 fn main() {
     let tcp_listener = TcpListener::bind(format!("{BIND_IP}:{PORT}")).unwrap();
