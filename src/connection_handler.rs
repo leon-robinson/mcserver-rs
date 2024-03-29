@@ -15,7 +15,6 @@ fn handle_packet(stream: &mut TcpStream) -> Result<()> {
     println!("packet_len: {packet_len}, packet_id: {packet_id:x}");
 
     if packet_id == 0 {
-        // TODO: Handle PacketError properly
         let test = protocol::HandshakePacket::from_stream(stream)?;
         println!("{test:?}");
     }

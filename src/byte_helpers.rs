@@ -12,7 +12,6 @@ use crate::protocol::{
 };
 
 /// Simply read from the `TcpStream` into a byte slice of length 1 and return index 0.
-// // TODO: Handle errors better.
 #[inline]
 pub fn read_u8(stream: &mut TcpStream) -> Result<u8> {
     let mut slice = [0u8; 1];
@@ -21,7 +20,6 @@ pub fn read_u8(stream: &mut TcpStream) -> Result<u8> {
 }
 
 /// Read from the `TcpStream` into a byte slice of length 2 and convert to u16 from big endian.
-// TODO: Handle errors better.
 #[inline]
 pub fn read_u16(stream: &mut TcpStream) -> Result<u16> {
     let mut buf = [0; 2];
