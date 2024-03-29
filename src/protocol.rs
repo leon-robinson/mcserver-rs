@@ -16,7 +16,7 @@ pub enum PacketError {
         source: FromUtf8Error,
         field_name: &'static str,
     },
-    #[snafu(display("String received has a bad range foe field: '{field_name}'"))]
+    #[snafu(display("String received has a bad range for field: '{field_name}'"))]
     BadStringRange { field_name: &'static str },
     #[snafu(display("String received has bad UTF-16 units for field: '{field_name}'"))]
     BadStringUTF16Units { field_name: &'static str },
