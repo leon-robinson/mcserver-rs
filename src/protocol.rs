@@ -79,6 +79,8 @@ pub enum PacketError {
     FailedByteWritesToStream { source: std::io::Error },
     #[snafu(display("Player name was too long: '{player_name}'."))]
     PlayerNameTooLong { player_name: String },
+    #[snafu(display("Packet was too large, size: '{size}', packet_id '{}'"))]
+    PacketTooLarge { size: i32, packet_id: i32 },
 }
 
 pub type Result<T, E = PacketError> = std::result::Result<T, E>;

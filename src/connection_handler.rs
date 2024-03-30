@@ -1,13 +1,14 @@
 use std::{io::Write, net::TcpStream};
 
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use uuid::Uuid;
 
 use crate::{
     byte_helpers, info,
     protocol::{
-        ClientboundPacket, FailedToFlushStreamSnafu, HandshakePacket, LoginStart, PingRequest,
-        PingResponse, Result, ServerboundPacket, State, StatusResponse,
+        ClientboundPacket, FailedToFlushStreamSnafu, HandshakePacket, LoginStart,
+        PacketTooLargeSnafu, PingRequest, PingResponse, Result, ServerboundPacket, State,
+        StatusResponse,
     },
     warn, STREAM_READ_TIMEOUT, STREAM_WRITE_TIMEOUT,
 };
@@ -96,7 +97,14 @@ impl Connection {
 fn handle_packet(connection: &mut Connection) -> Result<()> {
     let packet_len = connection.read_var_int("packet_len")?;
     let packet_id = connection.read_var_int("packet_id")?;
-    // TODO: Should probably check if the packet is too large.
+
+    ensure!(
+        packet_len <= 2_097_151,
+        PacketTooLargeSnafu {
+            size: packet_len,
+            packet_id
+        }
+    );
 
     match packet_id {
         0x00 => match connection.state {
