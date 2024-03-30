@@ -9,9 +9,10 @@ use std::{
 use snafu::{ensure, ResultExt};
 
 use crate::protocol::{
-    BadStringConversionSnafu, BadStringRangeSnafu, BadStringStreamReadSnafu,
-    BadStringUTF16UnitsSnafu, BadU16ReadSnafu, BadU8ReadSnafu, FailedByteWritesToStreamSnafu,
-    PacketError, Result, VarIntTooLargeSnafu, VarLongTooLargeSnafu,
+    BadI16ReadSnafu, BadI32ReadSnafu, BadI64ReadSnafu, BadI8ReadSnafu, BadStringConversionSnafu,
+    BadStringRangeSnafu, BadStringStreamReadSnafu, BadStringUTF16UnitsSnafu, BadU16ReadSnafu,
+    BadU8ReadSnafu, FailedByteWritesToStreamSnafu, PacketError, Result, VarIntTooLargeSnafu,
+    VarLongTooLargeSnafu,
 };
 
 #[macro_export]
@@ -26,28 +27,72 @@ macro_rules! sum_usize_to_i32 {
 
 /// Simply read from the `TcpStream` into a byte slice of length 1 and return index 0.
 #[inline]
-pub fn read_u8(stream: &mut TcpStream) -> Result<u8> {
+pub fn read_u8(stream: &mut TcpStream, field_name: &'static str) -> Result<u8> {
     let mut slice = [0u8; 1];
-    stream.read_exact(&mut slice).context(BadU8ReadSnafu)?;
+    stream
+        .read_exact(&mut slice)
+        .context(BadU8ReadSnafu { field_name })?;
     Ok(slice[0])
 }
 
 /// Read from the `TcpStream` into a byte slice of length 2 and convert to u16 from big endian.
 #[inline]
-pub fn read_u16(stream: &mut TcpStream) -> Result<u16> {
+pub fn read_u16(stream: &mut TcpStream, field_name: &'static str) -> Result<u16> {
     let mut buf = [0; 2];
-    stream.read_exact(&mut buf).context(BadU16ReadSnafu)?;
+    stream
+        .read_exact(&mut buf)
+        .context(BadU16ReadSnafu { field_name })?;
     Ok(u16::from_be_bytes(buf))
 }
 
+/// Read from the `TcpStream` into a byte slice of length 1 and convert to i8 from big endian.
+#[inline]
+pub fn read_i8(stream: &mut TcpStream, field_name: &'static str) -> Result<i8> {
+    let mut buf = [0; 1];
+    stream
+        .read_exact(&mut buf)
+        .context(BadI8ReadSnafu { field_name })?;
+    Ok(i8::from_be_bytes(buf))
+}
+
+/// Read from the `TcpStream` into a byte slice of length 2 and convert to i16 from big endian.
+#[inline]
+pub fn read_i16(stream: &mut TcpStream, field_name: &'static str) -> Result<i16> {
+    let mut buf = [0; 2];
+    stream
+        .read_exact(&mut buf)
+        .context(BadI16ReadSnafu { field_name })?;
+    Ok(i16::from_be_bytes(buf))
+}
+
+/// Read from the `TcpStream` into a byte slice of length 4 and convert to i32 from big endian.
+#[inline]
+pub fn read_i32(stream: &mut TcpStream, field_name: &'static str) -> Result<i32> {
+    let mut buf = [0; 4];
+    stream
+        .read_exact(&mut buf)
+        .context(BadI32ReadSnafu { field_name })?;
+    Ok(i32::from_be_bytes(buf))
+}
+
+/// Read from the `TcpStream` into a byte slice of length 8 and convert to i64 from big endian.
+#[inline]
+pub fn read_i64(stream: &mut TcpStream, field_name: &'static str) -> Result<i64> {
+    let mut buf = [0; 8];
+    stream
+        .read_exact(&mut buf)
+        .context(BadI64ReadSnafu { field_name })?;
+    Ok(i64::from_be_bytes(buf))
+}
+
 /// Algorithm from: <https://wiki.vg/Protocol#VarInt_and_VarLong>
-pub fn read_var_int(stream: &mut TcpStream) -> Result<i32> {
+pub fn read_var_int(stream: &mut TcpStream, field_name: &'static str) -> Result<i32> {
     let mut value: i32 = 0;
     let mut pos = 0;
     let mut current_byte: u8;
 
     loop {
-        current_byte = read_u8(stream)?;
+        current_byte = read_u8(stream, field_name)?;
         value |= ((i32::from(current_byte)) & SEGMENT_BITS) << pos;
 
         if ((i32::from(current_byte)) & CONTINUE_BIT) == 0 {
@@ -56,7 +101,7 @@ pub fn read_var_int(stream: &mut TcpStream) -> Result<i32> {
 
         pos += 7;
 
-        ensure!(pos < 32, VarIntTooLargeSnafu);
+        ensure!(pos < 32, VarIntTooLargeSnafu { field_name });
     }
 
     Ok(value)
@@ -84,13 +129,13 @@ pub fn create_var_int(data: i32) -> Result<Vec<u8>> {
 }
 
 /// Algorithm from:  <https://wiki.vg/Protocol#VarInt_and_VarLong>
-pub fn read_var_long(stream: &mut TcpStream) -> Result<i64> {
+pub fn read_var_long(stream: &mut TcpStream, field_name: &'static str) -> Result<i64> {
     let mut value: i64 = 0;
     let mut pos = 0;
     let mut current_byte: u8;
 
     loop {
-        current_byte = read_u8(stream)?;
+        current_byte = read_u8(stream, field_name)?;
         value |= ((i64::from(current_byte)) & (i64::from(SEGMENT_BITS))) << pos;
 
         if ((i32::from(current_byte)) & CONTINUE_BIT) == 0 {
@@ -99,7 +144,7 @@ pub fn read_var_long(stream: &mut TcpStream) -> Result<i64> {
 
         pos += 7;
 
-        ensure!(pos < 64, VarLongTooLargeSnafu);
+        ensure!(pos < 64, VarLongTooLargeSnafu { field_name });
     }
 
     Ok(value)
@@ -113,7 +158,7 @@ pub fn read_utf8_string(
     stream: &mut TcpStream,
     field_name: &'static str,
 ) -> Result<String, PacketError> {
-    let string_len_bytes = read_var_int(stream)?;
+    let string_len_bytes = read_var_int(stream, field_name)?;
 
     ensure!(
         (0..=32767).contains(&string_len_bytes),
@@ -139,7 +184,7 @@ pub fn read_utf8_string(
 
 /// Implementation from 'Notes' from: <https://wiki.vg/Protocol#Type:String>
 ///
-/// Creates and returns a UTF-8 string prefixed with varchar that can be sent to a client.
+/// Creates and returns a UTF-8 string prefixed with `VarInt` that can be sent to a client.
 ///
 /// Note that `field_name` is just for extra info when logging if there is an error.
 /// NOTE: Remember to flush after sending all data!
@@ -167,11 +212,20 @@ pub fn write_byte_slice(stream: &mut TcpStream, slice: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[inline]
-pub fn packet_len_as_var_int(lengths: &[usize]) {
-    let mut len_bytes = 0;
-
-    for len in lengths {
-        len_bytes += len;
-    }
+pub trait IntoBytes {
+    fn to_mc_bytes(a: Self) -> Vec<u8>;
 }
+
+macro_rules! impl_into_bytes {
+    ($($t:ty),*) => {
+        $(
+            impl IntoBytes for $t {
+                fn to_mc_bytes(a: Self) -> Vec<u8> {
+                    a.to_be_bytes().to_vec()
+                }
+            }
+        )*
+    };
+}
+
+impl_into_bytes!(u8, u16, u32, u64, i8, i16, i32, i64);

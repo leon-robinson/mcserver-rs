@@ -3,12 +3,12 @@ use std::{io::Write, net::TcpStream};
 use snafu::ResultExt;
 
 use crate::{
-    byte_helpers::{self},
+    byte_helpers, info,
     protocol::{
-        ClientboundPacket, FailedToFlushStreamSnafu, HandshakePacket, Result, ServerboundPacket,
-        State, StatusResponse,
+        ClientboundPacket, FailedToFlushStreamSnafu, HandshakePacket, PingRequest, PingResponse,
+        Result, ServerboundPacket, State, StatusResponse,
     },
-    STREAM_READ_TIMEOUT, STREAM_WRITE_TIMEOUT,
+    warn, STREAM_READ_TIMEOUT, STREAM_WRITE_TIMEOUT,
 };
 
 #[derive(Debug)]
@@ -20,26 +20,50 @@ pub struct Connection {
 impl Connection {
     /// Read the first u8 from the `TcpStream`.
     #[inline]
-    pub fn read_u8(&mut self) -> Result<u8> {
-        byte_helpers::read_u8(&mut self.tcp_stream)
+    pub fn read_u8(&mut self, field_name: &'static str) -> Result<u8> {
+        byte_helpers::read_u8(&mut self.tcp_stream, field_name)
     }
 
     /// Read the first u16 from the `TcpStream`
     #[inline]
-    pub fn read_u16(&mut self) -> Result<u16> {
-        byte_helpers::read_u16(&mut self.tcp_stream)
+    pub fn read_u16(&mut self, field_name: &'static str) -> Result<u16> {
+        byte_helpers::read_u16(&mut self.tcp_stream, field_name)
+    }
+
+    /// Read the first i8 from the `TcpStream`
+    #[inline]
+    pub fn read_i8(&mut self, field_name: &'static str) -> Result<i8> {
+        byte_helpers::read_i8(&mut self.tcp_stream, field_name)
+    }
+
+    /// Read the first i16 from the `TcpStream`
+    #[inline]
+    pub fn read_i16(&mut self, field_name: &'static str) -> Result<i16> {
+        byte_helpers::read_i16(&mut self.tcp_stream, field_name)
+    }
+
+    /// Read the first i32 from the `TcpStream`
+    #[inline]
+    pub fn read_i32(&mut self, field_name: &'static str) -> Result<i32> {
+        byte_helpers::read_i32(&mut self.tcp_stream, field_name)
+    }
+
+    /// Read the first i64 from the `TcpStream`
+    #[inline]
+    pub fn read_i64(&mut self, field_name: &'static str) -> Result<i64> {
+        byte_helpers::read_i64(&mut self.tcp_stream, field_name)
     }
 
     /// Read the first `VarInt` from the `TcpStream`
     #[inline]
-    pub fn read_var_int(&mut self) -> Result<i32> {
-        byte_helpers::read_var_int(&mut self.tcp_stream)
+    pub fn read_var_int(&mut self, field_name: &'static str) -> Result<i32> {
+        byte_helpers::read_var_int(&mut self.tcp_stream, field_name)
     }
 
     /// Read the first `VarLong` from the `TcpStream`
     #[inline]
-    pub fn read_var_long(&mut self) -> Result<i64> {
-        byte_helpers::read_var_long(&mut self.tcp_stream)
+    pub fn read_var_long(&mut self, field_name: &'static str) -> Result<i64> {
+        byte_helpers::read_var_long(&mut self.tcp_stream, field_name)
     }
 
     /// Read the first UTF-8 String from the `TcpStream`
@@ -63,16 +87,16 @@ impl Connection {
 
 /// Read and handle packet from the `TcpStream`.
 fn handle_packet(connection: &mut Connection) -> Result<()> {
-    let packet_len = connection.read_var_int()?;
-    let packet_id = connection.read_var_int()?;
+    let packet_len = connection.read_var_int("packet_len")?;
+    let packet_id = connection.read_var_int("packet_id")?;
     // TODO: Should probably check if the packet is too large.
 
     match packet_id {
-        0 => match connection.state {
+        0x00 => match connection.state {
             State::Unset => {
                 // Handshake.
                 let handshake_packet = HandshakePacket::from_connection(connection)?;
-                println!(
+                info!(
                     "Got handshake, they are connecting with {}:{} on protocol version {}, next state is {}.",
                     handshake_packet.server_address,
                     handshake_packet.server_port,
@@ -102,18 +126,36 @@ fn handle_packet(connection: &mut Connection) -> Result<()> {
                 connection.write_bytes(&packet)?;
                 connection.flush()?;
 
-                println!("Sent back StatusReponse packet.");
+                info!("Sent back StatusReponse packet.");
 
-                // TODO: Handle and respond to ping request.
+                handle_packet(connection)?; // Wait for Ping Request from client.
             }
             State::Login => {
                 // We get here from the handle_packet in the State::Unset handler.
 
-                println!("Now on LOGIN state.");
+                info!("Now on LOGIN state.");
+            }
+        },
+        0x01 => match connection.state {
+            State::Status => {
+                let packet = PingRequest::from_connection(connection)?;
+
+                connection.write_bytes(
+                    PingResponse::to_bytes(PingResponse {
+                        sys_time_millis: packet.sys_time_millis,
+                    })?
+                    .as_slice(),
+                )?;
+                connection.flush()?;
+            }
+            _ => {
+                warn!("Got packet_id 0x01 with state: {}", connection.state);
             }
         },
         _ => {
-            eprintln!("WARN: Unknown packet, skipping. packet_len: {packet_len}, packet_id: {packet_id:x}");
+            warn!(
+                "Unknown packet, skipping. packet_len (bytes): {packet_len}, packet_id: 0x{packet_id:02x}"
+            );
         }
     }
 

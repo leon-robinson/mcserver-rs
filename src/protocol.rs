@@ -1,3 +1,4 @@
+use crate::byte_helpers::IntoBytes;
 use snafu::{prelude::*, ResultExt};
 use std::string::FromUtf8Error;
 
@@ -11,7 +12,7 @@ use crate::{
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-// TODO: Add field_name for the rest of the errors.
+// TODO: Change field_name to err_info and add packet name to the error message instead of just field name.
 pub enum PacketError {
     #[snafu(display("Failed to read string for field: '{field_name}' from stream."))]
     BadStringStreamRead {
@@ -31,18 +32,44 @@ pub enum PacketError {
     BadStringUTF16Units {
         field_name: &'static str,
     },
-    #[snafu(display("Failed to read u8 value from stream."))]
+    #[snafu(display("Failed to read u8 value from stream for field: '{field_name}'"))]
     BadU8Read {
         source: std::io::Error,
+        field_name: &'static str,
     },
-    #[snafu(display("Failed to read u16 value from stream."))]
+    #[snafu(display("Failed to read u16 value from stream for field: '{field_name}'"))]
     BadU16Read {
         source: std::io::Error,
+        field_name: &'static str,
+    },
+    #[snafu(display("Failed to read i8 value from stream for field: '{field_name}'"))]
+    BadI8Read {
+        source: std::io::Error,
+        field_name: &'static str,
+    },
+    #[snafu(display("Failed to read i16 value from stream for field: '{field_name}'"))]
+    BadI16Read {
+        source: std::io::Error,
+        field_name: &'static str,
+    },
+    #[snafu(display("Failed to read i32 value from stream for field: '{field_name}'"))]
+    BadI32Read {
+        source: std::io::Error,
+        field_name: &'static str,
+    },
+    #[snafu(display("Failed to read i64 value from stream for field: '{field_name}'"))]
+    BadI64Read {
+        source: std::io::Error,
+        field_name: &'static str,
     },
     #[snafu(display("VarInt was too large."))]
-    VarIntTooLarge,
+    VarIntTooLarge {
+        field_name: &'static str,
+    },
     #[snafu(display("VarInt was too large."))]
-    VarLongTooLarge,
+    VarLongTooLarge {
+        field_name: &'static str,
+    },
     #[snafu(display("Invalid connection Status: '{status}'"))]
     InvalidStatus {
         source: EnumBoundsError,
@@ -86,10 +113,10 @@ pub struct HandshakePacket {
 
 impl ServerboundPacket for HandshakePacket {
     fn from_connection(connection: &mut Connection) -> Result<Self> {
-        let protocol_version = connection.read_var_int()?;
+        let protocol_version = connection.read_var_int("protocol_version")?;
         let server_address = connection.read_utf8_string("server_address")?;
-        let server_port = connection.read_u16()?;
-        let next_state = connection.read_var_int()?;
+        let server_port = connection.read_u16("server_port")?;
+        let next_state = connection.read_var_int("next_state")?;
         let next_state = next_state
             .try_into()
             .context(InvalidStatusSnafu { status: next_state })?;
@@ -99,6 +126,20 @@ impl ServerboundPacket for HandshakePacket {
             server_address,
             server_port,
             next_state,
+        })
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct PingRequest {
+    pub sys_time_millis: i64,
+}
+
+impl ServerboundPacket for PingRequest {
+    fn from_connection(connection: &mut Connection) -> Result<Self> {
+        Ok(Self {
+            sys_time_millis: connection.read_i64("sys_time_millis")?,
         })
     }
 }
@@ -154,11 +195,31 @@ impl ClientboundPacket for StatusResponse {
         );
 
         let mut s = create_utf8_string("json_status", &response_json)?;
-        let mut packet_id = create_var_int(0)?;
+        let mut packet_id = create_var_int(0)?; // TODO: Cache these.
         let mut packet_start = create_var_int(sum_usize_to_i32!(packet_id.len(), s.len()))?;
 
         packet_start.append(&mut packet_id);
         packet_start.append(&mut s);
+
+        Ok(packet_start)
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct PingResponse {
+    pub sys_time_millis: i64,
+}
+
+impl ClientboundPacket for PingResponse {
+    fn to_bytes(packet: Self) -> Result<Vec<u8>> {
+        let mut sys_time_millis = i64::to_mc_bytes(packet.sys_time_millis);
+        let mut packet_id = create_var_int(1)?;
+        let mut packet_start =
+            create_var_int(sum_usize_to_i32!(packet_id.len(), sys_time_millis.len()))?;
+
+        packet_start.append(&mut packet_id);
+        packet_start.append(&mut sys_time_millis);
 
         Ok(packet_start)
     }
