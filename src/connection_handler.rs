@@ -1,12 +1,13 @@
 use std::{io::Write, net::TcpStream};
 
 use snafu::ResultExt;
+use uuid::Uuid;
 
 use crate::{
     byte_helpers, info,
     protocol::{
-        ClientboundPacket, FailedToFlushStreamSnafu, HandshakePacket, PingRequest, PingResponse,
-        Result, ServerboundPacket, State, StatusResponse,
+        ClientboundPacket, FailedToFlushStreamSnafu, HandshakePacket, LoginStart, PingRequest,
+        PingResponse, Result, ServerboundPacket, State, StatusResponse,
     },
     warn, STREAM_READ_TIMEOUT, STREAM_WRITE_TIMEOUT,
 };
@@ -72,6 +73,12 @@ impl Connection {
         byte_helpers::read_utf8_string(&mut self.tcp_stream, field_name)
     }
 
+    /// Read the first `Uuid` from the `TcpStream`
+    #[inline]
+    pub fn read_uuid(&mut self, field_name: &'static str) -> Result<Uuid> {
+        byte_helpers::read_uuid(&mut self.tcp_stream, field_name)
+    }
+
     /// NOTE: Remember to flush after sending all data!
     #[inline]
     pub fn write_bytes(&mut self, slice: &[u8]) -> Result<()> {
@@ -134,11 +141,16 @@ fn handle_packet(connection: &mut Connection) -> Result<()> {
                 // We get here from the handle_packet in the State::Unset handler.
 
                 info!("Now on LOGIN state.");
+
+                let login_start_packet = LoginStart::from_connection(connection)?;
+                info!("{login_start_packet:?}");
             }
         },
         0x01 => match connection.state {
             State::Status => {
                 let packet = PingRequest::from_connection(connection)?;
+
+                info!("Got PingRequest with millis: {}", packet.sys_time_millis);
 
                 connection.write_bytes(
                     PingResponse::to_bytes(PingResponse {
@@ -147,6 +159,11 @@ fn handle_packet(connection: &mut Connection) -> Result<()> {
                     .as_slice(),
                 )?;
                 connection.flush()?;
+
+                info!(
+                    "Sent back PingResponse with millis: {}",
+                    packet.sys_time_millis
+                );
             }
             _ => {
                 warn!("Got packet_id 0x01 with state: {}", connection.state);

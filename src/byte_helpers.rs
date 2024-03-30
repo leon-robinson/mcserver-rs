@@ -7,12 +7,13 @@ use std::{
 };
 
 use snafu::{ensure, ResultExt};
+use uuid::Uuid;
 
 use crate::protocol::{
     BadI16ReadSnafu, BadI32ReadSnafu, BadI64ReadSnafu, BadI8ReadSnafu, BadStringConversionSnafu,
     BadStringRangeSnafu, BadStringStreamReadSnafu, BadStringUTF16UnitsSnafu, BadU16ReadSnafu,
-    BadU8ReadSnafu, FailedByteWritesToStreamSnafu, PacketError, Result, VarIntTooLargeSnafu,
-    VarLongTooLargeSnafu,
+    BadU8ReadSnafu, BadUUIDReadSnafu, FailedByteWritesToStreamSnafu, PacketError, Result,
+    VarIntTooLargeSnafu, VarLongTooLargeSnafu,
 };
 
 #[macro_export]
@@ -148,6 +149,14 @@ pub fn read_var_long(stream: &mut TcpStream, field_name: &'static str) -> Result
     }
 
     Ok(value)
+}
+
+pub fn read_uuid(stream: &mut TcpStream, field_name: &'static str) -> Result<Uuid> {
+    let mut buf = [0; 16];
+    stream
+        .read_exact(&mut buf)
+        .context(BadUUIDReadSnafu { field_name })?;
+    Ok(Uuid::from_bytes(buf))
 }
 
 /// Implementation from 'Notes' from: <https://wiki.vg/Protocol#Type:String>

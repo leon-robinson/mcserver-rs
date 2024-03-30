@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 snafu = "0.8.2"
+uuid = "1.8.0"

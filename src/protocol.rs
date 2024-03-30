@@ -1,6 +1,7 @@
 use crate::byte_helpers::IntoBytes;
 use snafu::{prelude::*, ResultExt};
 use std::string::FromUtf8Error;
+use uuid::Uuid;
 
 use crate::{
     back_to_enum,
@@ -25,13 +26,9 @@ pub enum PacketError {
         field_name: &'static str,
     },
     #[snafu(display("String received has a bad range for field: '{field_name}'"))]
-    BadStringRange {
-        field_name: &'static str,
-    },
+    BadStringRange { field_name: &'static str },
     #[snafu(display("String received has bad UTF-16 units for field: '{field_name}'"))]
-    BadStringUTF16Units {
-        field_name: &'static str,
-    },
+    BadStringUTF16Units { field_name: &'static str },
     #[snafu(display("Failed to read u8 value from stream for field: '{field_name}'"))]
     BadU8Read {
         source: std::io::Error,
@@ -62,25 +59,26 @@ pub enum PacketError {
         source: std::io::Error,
         field_name: &'static str,
     },
-    #[snafu(display("VarInt was too large."))]
-    VarIntTooLarge {
+    #[snafu(display("Failed to read UUID from stream for field: '{field_name}'"))]
+    BadUUIDRead {
+        source: std::io::Error,
         field_name: &'static str,
     },
     #[snafu(display("VarInt was too large."))]
-    VarLongTooLarge {
-        field_name: &'static str,
-    },
+    VarIntTooLarge { field_name: &'static str },
+    #[snafu(display("VarInt was too large."))]
+    VarLongTooLarge { field_name: &'static str },
     #[snafu(display("Invalid connection Status: '{status}'"))]
     InvalidStatus {
         source: EnumBoundsError,
         status: i32,
     },
-    FailedToFlushStream {
-        source: std::io::Error,
-    },
-    FailedByteWritesToStream {
-        source: std::io::Error,
-    },
+    #[snafu(display("Failed to flush in TcpStream."))]
+    FailedToFlushStream { source: std::io::Error },
+    #[snafu(display("Failed to write bytes to TcpStream."))]
+    FailedByteWritesToStream { source: std::io::Error },
+    #[snafu(display("Player name was too long: '{player_name}'."))]
+    PlayerNameTooLong { player_name: String },
 }
 
 pub type Result<T, E = PacketError> = std::result::Result<T, E>;
@@ -126,6 +124,29 @@ impl ServerboundPacket for HandshakePacket {
             server_address,
             server_port,
             next_state,
+        })
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct LoginStart {
+    name: String,
+    uuid: Uuid,
+}
+
+impl ServerboundPacket for LoginStart {
+    fn from_connection(connection: &mut Connection) -> Result<Self> {
+        let name = connection.read_utf8_string("name")?;
+
+        ensure!(
+            name.len() <= 16,
+            PlayerNameTooLongSnafu { player_name: name }
+        );
+
+        Ok(Self {
+            name,
+            uuid: connection.read_uuid("uuid")?,
         })
     }
 }
