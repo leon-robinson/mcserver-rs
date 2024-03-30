@@ -93,6 +93,10 @@ pub enum PacketError {
     PrivateKeyGenerationFailed { source: rsa::errors::Error },
     #[snafu(display("Failed to convert public key into Document"))]
     PublicKeyDocumentConversionFailed { source: rsa::pkcs8::spki::Error },
+    #[snafu(display("Failed to convert i32 to usize"))]
+    BadI32ToUsizeConversion { source: std::num::TryFromIntError },
+    #[snafu(display("Failed to convert usize to i32"))]
+    BadUsizeToI32Conversion { source: std::num::TryFromIntError },
 }
 
 pub type Result<T, E = PacketError> = std::result::Result<T, E>;
@@ -191,10 +195,15 @@ pub struct EncryptionResponse {
 impl ServerboundPacket for EncryptionResponse {
     fn from_connection(connection: &mut Connection) -> Result<Self> {
         let shared_secret_length = connection.read_var_int("shared_secret_length")?;
-        let shared_secret =
-            connection.read_bytes("shared_secret", shared_secret_length as usize)?;
+        let shared_secret = connection.read_bytes(
+            "shared_secret",
+            usize::try_from(shared_secret_length).context(BadI32ToUsizeConversionSnafu)?,
+        )?;
         let verify_token_length = connection.read_var_int("verify_token_length")?;
-        let verify_token = connection.read_bytes("verify_token", verify_token_length as usize)?;
+        let verify_token = connection.read_bytes(
+            "verify_token",
+            usize::try_from(verify_token_length).context(BadI32ToUsizeConversionSnafu)?,
+        )?;
 
         Ok(Self {
             shared_secret_length,
@@ -309,7 +318,7 @@ impl ClientboundPacket for EncryptionRequest {
         let mut public_key_len = create_var_int(packet.public_key_len)?;
         let mut public_key = packet.public_key;
         let mut verify_token_length = create_var_int(packet.verify_token_length)?;
-        let mut verify_token = packet.verify_token;
+        let verify_token = packet.verify_token;
         let mut packet_id = create_var_int(1)?;
         let mut packet_start = create_var_int(sum_usize_to_i32!(
             packet_id.len(),
@@ -325,7 +334,7 @@ impl ClientboundPacket for EncryptionRequest {
         packet_start.append(&mut public_key_len);
         packet_start.append(&mut public_key);
         packet_start.append(&mut verify_token_length);
-        packet_start.extend_from_slice(&mut verify_token);
+        packet_start.extend_from_slice(&verify_token);
 
         Ok(packet_start)
     }

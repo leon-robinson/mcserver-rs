@@ -2,8 +2,8 @@ use std::{net::TcpListener, time::Duration};
 
 use once_cell::sync::Lazy;
 use protocol::{
-    ClientboundPacket, EncryptionRequest, PrivateKeyGenerationFailedSnafu,
-    PublicKeyDocumentConversionFailedSnafu,
+    BadI32ToUsizeConversionSnafu, BadUsizeToI32ConversionSnafu, ClientboundPacket,
+    EncryptionRequest, PrivateKeyGenerationFailedSnafu, PublicKeyDocumentConversionFailedSnafu,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use rsa::{pkcs8::EncodePublicKey, RsaPrivateKey, RsaPublicKey};
@@ -28,9 +28,14 @@ pub static KEY_AND_REQUEST: Lazy<(RsaPrivateKey, Vec<u8>)> = Lazy::new(|| {
     let mut rng = StdRng::from_entropy();
     let public_key_bits: i32 = 1024;
 
-    let private_key = RsaPrivateKey::new(&mut rng, public_key_bits as usize)
-        .context(PrivateKeyGenerationFailedSnafu)
-        .unwrap();
+    let private_key = RsaPrivateKey::new(
+        &mut rng,
+        usize::try_from(public_key_bits)
+            .context(BadI32ToUsizeConversionSnafu)
+            .unwrap(),
+    )
+    .context(PrivateKeyGenerationFailedSnafu)
+    .unwrap();
     let public_key = RsaPublicKey::from(&private_key);
     let public_key_bytes = RsaPublicKey::to_public_key_der(&public_key)
         .context(PublicKeyDocumentConversionFailedSnafu)
@@ -38,8 +43,12 @@ pub static KEY_AND_REQUEST: Lazy<(RsaPrivateKey, Vec<u8>)> = Lazy::new(|| {
         .to_vec();
 
     let encryption_request = EncryptionRequest::to_bytes(EncryptionRequest {
-        server_id: String::from(""),
-        public_key_len: public_key_bytes.len() as i32,
+        server_id: String::new(),
+        public_key_len: public_key_bytes
+            .len()
+            .try_into()
+            .context(BadUsizeToI32ConversionSnafu)
+            .unwrap(),
         public_key: public_key_bytes,
         verify_token_length: 4,
         verify_token: rng.gen(),
