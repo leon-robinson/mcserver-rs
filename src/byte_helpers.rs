@@ -1,15 +1,28 @@
 const SEGMENT_BITS: i32 = 0x7F;
 const CONTINUE_BIT: i32 = 0x80;
 
-use std::{io::Read, net::TcpStream};
+use std::{
+    io::{Read, Write},
+    net::TcpStream,
+};
 
 use snafu::{ensure, ResultExt};
 
 use crate::protocol::{
     BadStringConversionSnafu, BadStringRangeSnafu, BadStringStreamReadSnafu,
-    BadStringUTF16UnitsSnafu, BadU16ReadSnafu, BadU8ReadSnafu, PacketError, Result,
-    VarIntTooLargeSnafu, VarLongTooLargeSnafu,
+    BadStringUTF16UnitsSnafu, BadU16ReadSnafu, BadU8ReadSnafu, FailedByteWritesToStreamSnafu,
+    PacketError, Result, VarIntTooLargeSnafu, VarLongTooLargeSnafu,
 };
+
+#[macro_export]
+macro_rules! sum_usize_to_i32 {
+    () => {
+        0
+    };
+    ($head:expr $(, $tail:expr)*) => {
+        $head as i32 + sum_usize_to_i32!($($tail),*)
+    };
+}
 
 /// Simply read from the `TcpStream` into a byte slice of length 1 and return index 0.
 #[inline]
@@ -47,6 +60,27 @@ pub fn read_var_int(stream: &mut TcpStream) -> Result<i32> {
     }
 
     Ok(value)
+}
+
+/// Algorithm from: <https://wiki.vg/Protocol#VarInt_and_VarLong>
+///
+/// NOTE: Remember to flush after sending all data!
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+pub fn create_var_int(data: i32) -> Result<Vec<u8>> {
+    let mut data = data;
+    let mut bytes: Vec<u8> = Vec::new();
+
+    loop {
+        if (data & !SEGMENT_BITS) == 0 {
+            bytes.push(data as u8);
+            return Ok(bytes);
+        }
+
+        bytes.push(((data & SEGMENT_BITS) | CONTINUE_BIT) as u8);
+
+        data >>= 7;
+    }
 }
 
 /// Algorithm from:  <https://wiki.vg/Protocol#VarInt_and_VarLong>
@@ -94,11 +128,50 @@ pub fn read_utf8_string(
     let utf8_string =
         String::from_utf8(utf8_bytes).context(BadStringConversionSnafu { field_name })?;
 
-    let utf16_units = utf8_string.chars().count();
+    let utf16_units = utf8_string.len(); // TODO: Might be incorrect, this should probably be amount of chars instead of len.
     ensure!(
         utf16_units <= string_len_bytes as usize * 3,
         BadStringUTF16UnitsSnafu { field_name }
     );
 
     Ok(utf8_string)
+}
+
+/// Implementation from 'Notes' from: <https://wiki.vg/Protocol#Type:String>
+///
+/// Creates and returns a UTF-8 string prefixed with varchar that can be sent to a client.
+///
+/// Note that `field_name` is just for extra info when logging if there is an error.
+/// NOTE: Remember to flush after sending all data!
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub fn create_utf8_string(field_name: &'static str, s: &str) -> Result<Vec<u8>> {
+    let utf8_bytes_len = s.len(); // Might be incorrect, this should probably be amount of chars instead of len.
+
+    ensure!(
+        utf8_bytes_len <= 32767 * 3,
+        BadStringUTF16UnitsSnafu { field_name }
+    );
+
+    let mut vec = create_var_int(utf8_bytes_len as i32)?;
+    vec.extend_from_slice(s.as_bytes());
+
+    Ok(vec)
+}
+
+#[inline]
+/// NOTE: Remember to flush after sending all data!
+pub fn write_byte_slice(stream: &mut TcpStream, slice: &[u8]) -> Result<()> {
+    stream
+        .write_all(slice)
+        .context(FailedByteWritesToStreamSnafu)?;
+    Ok(())
+}
+
+#[inline]
+pub fn packet_len_as_var_int(lengths: &[usize]) {
+    let mut len_bytes = 0;
+
+    for len in lengths {
+        len_bytes += len;
+    }
 }

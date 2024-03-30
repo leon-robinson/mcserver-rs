@@ -22,13 +22,19 @@ macro_rules! back_to_enum {
         }
 
         impl std::convert::TryFrom<i32> for $name {
-            type Error = crate::macros::EnumBoundsError;
+            type Error = $crate::macros::EnumBoundsError;
 
             fn try_from(v: i32) -> Result<Self, Self::Error> {
                 match v {
                     $(x if x == $name::$vname as i32 => Ok($name::$vname),)*
-                    _ => Err(crate::macros::EnumBoundsError),
+                    _ => Err($crate::macros::EnumBoundsError),
                 }
+            }
+        }
+
+        impl core::fmt::Display for $name {
+            fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                write!(f, "{:?}", self)
             }
         }
     }
