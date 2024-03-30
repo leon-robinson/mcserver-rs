@@ -24,7 +24,13 @@ pub mod log;
 pub mod macros;
 pub mod protocol;
 
-pub static KEY_AND_REQUEST: Lazy<(RsaPrivateKey, Vec<u8>)> = Lazy::new(|| {
+pub struct EncryptionInfo {
+    pub private_key: RsaPrivateKey,
+    pub encryption_request_bytes: Vec<u8>,
+    pub verify_token: [u8; 4],
+}
+
+pub static ENCRYPTION_INFO: Lazy<EncryptionInfo> = Lazy::new(|| {
     let mut rng = StdRng::from_entropy();
     let public_key_bits: i32 = 1024;
 
@@ -42,7 +48,9 @@ pub static KEY_AND_REQUEST: Lazy<(RsaPrivateKey, Vec<u8>)> = Lazy::new(|| {
         .unwrap()
         .to_vec();
 
-    let encryption_request = EncryptionRequest::to_bytes(EncryptionRequest {
+    let verify_token: [u8; 4] = rng.gen();
+
+    let encryption_request_bytes = EncryptionRequest::to_bytes(EncryptionRequest {
         server_id: String::new(),
         public_key_len: public_key_bytes
             .len()
@@ -51,11 +59,15 @@ pub static KEY_AND_REQUEST: Lazy<(RsaPrivateKey, Vec<u8>)> = Lazy::new(|| {
             .unwrap(),
         public_key: public_key_bytes,
         verify_token_length: 4,
-        verify_token: rng.gen(),
+        verify_token: verify_token.clone(),
     })
     .unwrap();
 
-    (private_key, encryption_request)
+    EncryptionInfo {
+        private_key,
+        encryption_request_bytes,
+        verify_token,
+    }
 });
 
 fn main() {

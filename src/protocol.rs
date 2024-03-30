@@ -186,10 +186,10 @@ impl ServerboundPacket for PingRequest {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct EncryptionResponse {
-    shared_secret_length: i32,
-    shared_secret: Vec<u8>,
-    verify_token_length: i32,
-    verify_token: Vec<u8>,
+    pub shared_secret_length: i32,
+    pub shared_secret: Vec<u8>,
+    pub verify_token_length: i32,
+    pub verify_token: Vec<u8>,
 }
 
 impl ServerboundPacket for EncryptionResponse {

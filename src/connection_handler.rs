@@ -1,5 +1,11 @@
 use std::{io::Write, net::TcpStream};
 
+use aes::*;
+use aes::{
+    cipher::{generic_array::GenericArray, BlockEncryptMut, KeyInit, KeyIvInit},
+    Aes128, Block,
+};
+use rsa::Pkcs1v15Encrypt;
 use snafu::{ensure, ResultExt};
 use uuid::Uuid;
 
@@ -10,7 +16,7 @@ use crate::{
         LoginStart, PacketTooLargeSnafu, PingRequest, PingResponse, Result, ServerboundPacket,
         State, StatusResponse,
     },
-    warn, KEY_AND_REQUEST, STREAM_READ_TIMEOUT, STREAM_WRITE_TIMEOUT,
+    warn, ENCRYPTION_INFO, STREAM_READ_TIMEOUT, STREAM_WRITE_TIMEOUT,
 };
 
 #[derive(Debug)]
@@ -98,6 +104,9 @@ impl Connection {
     }
 }
 
+type Aes128Cfb8Enc = cfb8::Encryptor<aes::Aes128>;
+type Aes128Cfb8Dec = cfb8::Decryptor<aes::Aes128>;
+
 /// Read and handle packet from the `TcpStream`.
 fn handle_packet(connection: &mut Connection) -> Result<()> {
     let packet_len = connection.read_var_int("packet_len")?;
@@ -158,7 +167,7 @@ fn handle_packet(connection: &mut Connection) -> Result<()> {
                 let login_start_packet = LoginStart::from_connection(connection)?;
                 info!("{login_start_packet:?}");
 
-                connection.write_bytes(&KEY_AND_REQUEST.1)?;
+                connection.write_bytes(&ENCRYPTION_INFO.encryption_request_bytes)?;
                 connection.flush()?;
 
                 info!("Sent encryption request.");
@@ -188,7 +197,59 @@ fn handle_packet(connection: &mut Connection) -> Result<()> {
             State::Login => {
                 let encryption_response = EncryptionResponse::from_connection(connection)?;
 
-                info!("{encryption_response:?}");
+                // TODO: Sort out unwraps and prints and stuff
+                let secret_key_encrypted = &encryption_response.shared_secret;
+                let secret_key = ENCRYPTION_INFO
+                    .private_key
+                    .decrypt(Pkcs1v15Encrypt, &secret_key_encrypted)
+                    .unwrap();
+                let verify_token_encrypted = &encryption_response.verify_token;
+                let verify_token = ENCRYPTION_INFO
+                    .private_key
+                    .decrypt(Pkcs1v15Encrypt, &verify_token_encrypted)
+                    .unwrap();
+
+                if verify_token.len() != 4 {
+                    panic!("bad verify len");
+                }
+
+                if secret_key.len() != 16 {
+                    panic!("bad secret key len");
+                }
+
+                if verify_token.as_slice() == ENCRYPTION_INFO.verify_token {
+                    println!("YEEEHAAA");
+                } else {
+                    panic!("bad verify bytes");
+                }
+
+                fn vec_to_array<T, const N: usize>(v: Vec<T>) -> [T; N] {
+                    v.try_into().unwrap_or_else(|v: Vec<T>| {
+                        panic!("Expected a Vec of length {} but it was {}", N, v.len())
+                    })
+                }
+
+                use cipher::{AsyncStreamCipher, KeyIvInit};
+                let key: [u8; 16] = vec_to_array(secret_key);
+
+                let plaintext = *b"hello world! this is my plaintext.";
+                let mut buf = plaintext.to_vec();
+                type Enc = cfb8::Encryptor<Aes128>;
+                type Dec = cfb8::Decryptor<Aes128>;
+                let enc = Enc::new_from_slices(&key, &key).unwrap();
+                enc.encrypt(buf.as_mut_slice());
+                for b in &buf {
+                    print!("{:02x}", b);
+                }
+                println!();
+                let dec = Dec::new_from_slices(&key, &key).unwrap();
+                dec.decrypt(buf.as_mut_slice());
+                for b in &buf {
+                    print!("{:02x}", b);
+                }
+                println!();
+
+                //info!("{encryption_response:?}");
             }
             _ => {
                 warn!("Got packet_id 0x01 with state: {}", connection.state);
