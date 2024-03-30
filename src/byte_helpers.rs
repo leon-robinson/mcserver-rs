@@ -10,10 +10,10 @@ use snafu::{ensure, ResultExt};
 use uuid::Uuid;
 
 use crate::protocol::{
-    BadI16ReadSnafu, BadI32ReadSnafu, BadI64ReadSnafu, BadI8ReadSnafu, BadStringConversionSnafu,
-    BadStringRangeSnafu, BadStringStreamReadSnafu, BadStringUTF16UnitsSnafu, BadU16ReadSnafu,
-    BadU8ReadSnafu, BadUUIDReadSnafu, FailedByteWritesToStreamSnafu, PacketError, Result,
-    VarIntTooLargeSnafu, VarLongTooLargeSnafu,
+    BadByteVecReadSnafu, BadI16ReadSnafu, BadI32ReadSnafu, BadI64ReadSnafu, BadI8ReadSnafu,
+    BadStringConversionSnafu, BadStringRangeSnafu, BadStringStreamReadSnafu,
+    BadStringUTF16UnitsSnafu, BadU16ReadSnafu, BadU8ReadSnafu, BadUUIDReadSnafu,
+    FailedByteWritesToStreamSnafu, PacketError, Result, VarIntTooLargeSnafu, VarLongTooLargeSnafu,
 };
 
 #[macro_export]
@@ -24,6 +24,16 @@ macro_rules! sum_usize_to_i32 {
     ($head:expr $(, $tail:expr)*) => {
         $head as i32 + sum_usize_to_i32!($($tail),*)
     };
+}
+
+/// Read from the `TcpStream` into a `Vec<u8>`
+#[inline]
+pub fn read_bytes(stream: &mut TcpStream, field_name: &'static str, len: usize) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; len];
+    stream
+        .read_exact(&mut buf)
+        .context(BadByteVecReadSnafu { len, field_name })?;
+    Ok(buf)
 }
 
 /// Simply read from the `TcpStream` into a byte slice of length 1 and return index 0.

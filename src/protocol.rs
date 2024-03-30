@@ -15,7 +15,7 @@ use crate::{
 #[snafu(visibility(pub))]
 // TODO: Change field_name to err_info and add packet name to the error message instead of just field name.
 pub enum PacketError {
-    #[snafu(display("Failed to read string for field: '{field_name}' from stream."))]
+    #[snafu(display("Failed to read string for field: '{field_name}' from stream"))]
     BadStringStreamRead {
         source: std::io::Error,
         field_name: &'static str,
@@ -29,6 +29,12 @@ pub enum PacketError {
     BadStringRange { field_name: &'static str },
     #[snafu(display("String received has bad UTF-16 units for field: '{field_name}'"))]
     BadStringUTF16Units { field_name: &'static str },
+    #[snafu(display("Failed to read into Vec<u8> of length '{len}' for field: '{field_name}'"))]
+    BadByteVecRead {
+        source: std::io::Error,
+        len: usize,
+        field_name: &'static str,
+    },
     #[snafu(display("Failed to read u8 value from stream for field: '{field_name}'"))]
     BadU8Read {
         source: std::io::Error,
@@ -64,23 +70,29 @@ pub enum PacketError {
         source: std::io::Error,
         field_name: &'static str,
     },
-    #[snafu(display("VarInt was too large."))]
+    #[snafu(display("VarInt was too large"))]
     VarIntTooLarge { field_name: &'static str },
-    #[snafu(display("VarInt was too large."))]
+    #[snafu(display("VarInt was too large"))]
     VarLongTooLarge { field_name: &'static str },
     #[snafu(display("Invalid connection Status: '{status}'"))]
     InvalidStatus {
         source: EnumBoundsError,
         status: i32,
     },
-    #[snafu(display("Failed to flush in TcpStream."))]
+    #[snafu(display("Failed to flush in TcpStream"))]
     FailedToFlushStream { source: std::io::Error },
-    #[snafu(display("Failed to write bytes to TcpStream."))]
+    #[snafu(display("Failed to write bytes to TcpStream"))]
     FailedByteWritesToStream { source: std::io::Error },
-    #[snafu(display("Player name was too long: '{player_name}'."))]
+    #[snafu(display("Player name was too long: '{player_name}'"))]
     PlayerNameTooLong { player_name: String },
     #[snafu(display("Packet was too large, size: '{size}', packet_id '{}'"))]
     PacketTooLarge { size: i32, packet_id: i32 },
+    #[snafu(display("Server ID is too long in Encryption Request, server_id: {server_id}"))]
+    ServerIDTooLong { server_id: String },
+    #[snafu(display("Failed to generate RSA private key"))]
+    PrivateKeyGenerationFailed { source: rsa::errors::Error },
+    #[snafu(display("Failed to convert public key into Document"))]
+    PublicKeyDocumentConversionFailed { source: rsa::pkcs8::spki::Error },
 }
 
 pub type Result<T, E = PacketError> = std::result::Result<T, E>;
@@ -169,6 +181,32 @@ impl ServerboundPacket for PingRequest {
 
 #[derive(Debug)]
 #[allow(dead_code)]
+pub struct EncryptionResponse {
+    shared_secret_length: i32,
+    shared_secret: Vec<u8>,
+    verify_token_length: i32,
+    verify_token: Vec<u8>,
+}
+
+impl ServerboundPacket for EncryptionResponse {
+    fn from_connection(connection: &mut Connection) -> Result<Self> {
+        let shared_secret_length = connection.read_var_int("shared_secret_length")?;
+        let shared_secret =
+            connection.read_bytes("shared_secret", shared_secret_length as usize)?;
+        let verify_token_length = connection.read_var_int("verify_token_length")?;
+        let verify_token = connection.read_bytes("verify_token", verify_token_length as usize)?;
+
+        Ok(Self {
+            shared_secret_length,
+            shared_secret,
+            verify_token_length,
+            verify_token,
+        })
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
 pub struct StatusResponse {
     pub version_name: String,
     pub version_protocol: i32,
@@ -243,6 +281,51 @@ impl ClientboundPacket for PingResponse {
 
         packet_start.append(&mut packet_id);
         packet_start.append(&mut sys_time_millis);
+
+        Ok(packet_start)
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct EncryptionRequest {
+    pub server_id: String,
+    pub public_key_len: i32,
+    pub public_key: Vec<u8>,
+    pub verify_token_length: i32, // Should always be 4.
+    pub verify_token: [u8; 4],    // A sequence of random bytes.
+}
+
+impl ClientboundPacket for EncryptionRequest {
+    fn to_bytes(packet: Self) -> Result<Vec<u8>> {
+        ensure!(
+            packet.server_id.len() <= 20,
+            ServerIDTooLongSnafu {
+                server_id: packet.server_id
+            }
+        );
+
+        let mut server_id = create_utf8_string("server_id", &packet.server_id)?;
+        let mut public_key_len = create_var_int(packet.public_key_len)?;
+        let mut public_key = packet.public_key;
+        let mut verify_token_length = create_var_int(packet.verify_token_length)?;
+        let mut verify_token = packet.verify_token;
+        let mut packet_id = create_var_int(1)?;
+        let mut packet_start = create_var_int(sum_usize_to_i32!(
+            packet_id.len(),
+            server_id.len(),
+            public_key_len.len(),
+            public_key.len(),
+            verify_token_length.len(),
+            verify_token.len()
+        ))?;
+
+        packet_start.append(&mut packet_id);
+        packet_start.append(&mut server_id);
+        packet_start.append(&mut public_key_len);
+        packet_start.append(&mut public_key);
+        packet_start.append(&mut verify_token_length);
+        packet_start.extend_from_slice(&mut verify_token);
 
         Ok(packet_start)
     }

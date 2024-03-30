@@ -6,11 +6,11 @@ use uuid::Uuid;
 use crate::{
     byte_helpers, info,
     protocol::{
-        ClientboundPacket, FailedToFlushStreamSnafu, HandshakePacket, LoginStart,
-        PacketTooLargeSnafu, PingRequest, PingResponse, Result, ServerboundPacket, State,
-        StatusResponse,
+        ClientboundPacket, EncryptionResponse, FailedToFlushStreamSnafu, HandshakePacket,
+        LoginStart, PacketTooLargeSnafu, PingRequest, PingResponse, Result, ServerboundPacket,
+        State, StatusResponse,
     },
-    warn, STREAM_READ_TIMEOUT, STREAM_WRITE_TIMEOUT,
+    warn, KEY_AND_REQUEST, STREAM_READ_TIMEOUT, STREAM_WRITE_TIMEOUT,
 };
 
 #[derive(Debug)]
@@ -78,6 +78,11 @@ impl Connection {
     #[inline]
     pub fn read_uuid(&mut self, field_name: &'static str) -> Result<Uuid> {
         byte_helpers::read_uuid(&mut self.tcp_stream, field_name)
+    }
+
+    #[inline]
+    pub fn read_bytes(&mut self, field_name: &'static str, len: usize) -> Result<Vec<u8>> {
+        byte_helpers::read_bytes(&mut self.tcp_stream, field_name, len)
     }
 
     /// NOTE: Remember to flush after sending all data!
@@ -152,6 +157,13 @@ fn handle_packet(connection: &mut Connection) -> Result<()> {
 
                 let login_start_packet = LoginStart::from_connection(connection)?;
                 info!("{login_start_packet:?}");
+
+                connection.write_bytes(&KEY_AND_REQUEST.1)?;
+                connection.flush()?;
+
+                info!("Sent encryption request.");
+
+                handle_packet(connection)?;
             }
         },
         0x01 => match connection.state {
@@ -172,6 +184,11 @@ fn handle_packet(connection: &mut Connection) -> Result<()> {
                     "Sent back PingResponse with millis: {}",
                     packet.sys_time_millis
                 );
+            }
+            State::Login => {
+                let encryption_response = EncryptionResponse::from_connection(connection)?;
+
+                info!("{encryption_response:?}");
             }
             _ => {
                 warn!("Got packet_id 0x01 with state: {}", connection.state);
@@ -198,6 +215,9 @@ pub fn handle_connection(stream: TcpStream) {
     stream
         .set_write_timeout(Some(STREAM_WRITE_TIMEOUT))
         .expect("Failed to set write timeout for TcpStream.");
+    stream
+        .set_nonblocking(false)
+        .expect("Failed to set nonblocking false for TcpStream.");
 
     let mut connection = Connection {
         tcp_stream: stream,
