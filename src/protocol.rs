@@ -1,7 +1,11 @@
-use snafu::prelude::*;
+use snafu::{prelude::*, ResultExt};
 use std::{net::TcpStream, string::FromUtf8Error};
 
-use crate::byte_helpers::{read_u16, read_utf8_string, read_var_int};
+use crate::{
+    back_to_enum,
+    byte_helpers::{read_u16, read_utf8_string, read_var_int},
+    macros::EnumBoundsError,
+};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -28,6 +32,11 @@ pub enum PacketError {
     VarIntTooLarge,
     #[snafu(display("VarInt was too large."))]
     VarLongTooLarge,
+    #[snafu(display("Invalid connection Status: '{status}'"))]
+    InvalidStatus {
+        source: EnumBoundsError,
+        status: i32,
+    },
 }
 
 pub type Result<T, E = PacketError> = std::result::Result<T, E>;
@@ -36,22 +45,38 @@ pub trait Packet: Sized {
     fn from_stream(stream: &mut TcpStream) -> Result<Self>;
 }
 
+back_to_enum! {
+    #[derive(Debug)]
+    pub enum State {
+        Status = 1,
+        Login = 2,
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct HandshakePacket {
     protocol_version: i32,
     server_address: String,
     server_port: u16,
-    next_state: i32, // TODO: Make this enum of State
+    next_state: State,
 }
 
 impl Packet for HandshakePacket {
     fn from_stream(stream: &mut TcpStream) -> Result<Self> {
+        let protocol_version = read_var_int(stream)?;
+        let server_address = read_utf8_string(stream, "server_address")?;
+        let server_port = read_u16(stream)?;
+        let next_state = read_var_int(stream)?;
+        let next_state = next_state
+            .try_into()
+            .context(InvalidStatusSnafu { status: next_state })?;
+
         Ok(Self {
-            protocol_version: read_var_int(stream)?,
-            server_address: read_utf8_string(stream, "server_address")?,
-            server_port: read_u16(stream)?,
-            next_state: read_var_int(stream)?,
+            protocol_version,
+            server_address,
+            server_port,
+            next_state,
         })
     }
 }
