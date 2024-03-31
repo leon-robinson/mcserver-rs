@@ -85,6 +85,8 @@ fn main() {
     let tcp_listener =
         TcpListener::bind(format!("{BIND_IP}:{PORT}")).expect("Failed to bind TcpListener.");
 
+    Lazy::force(&ENCRYPTION_INFO);
+
     // TODO: Use a thread pool.
     for stream in tcp_listener.incoming() {
         println!("[NEW CONNECTION]");
