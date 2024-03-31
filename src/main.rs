@@ -1,5 +1,6 @@
 use std::{net::TcpListener, time::Duration};
 
+use aes::Aes128;
 use once_cell::sync::Lazy;
 use protocol::{
     BadI32ToUsizeConversionSnafu, BadUsizeToI32ConversionSnafu, ClientboundPacket,
@@ -18,11 +19,17 @@ pub const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 // Not yet used constants.
 pub const _CONNECTION_STREAM_THREAD_POOL_SIZE: i32 = 4;
 
+pub type Enc = cfb8::Encryptor<Aes128>;
+pub type Dec = cfb8::Decryptor<Aes128>;
+
 pub mod byte_helpers;
 pub mod connection_handler;
+pub mod crypto;
 pub mod log;
 pub mod macros;
+pub mod packet_handlers;
 pub mod protocol;
+pub mod read_stream;
 
 pub struct EncryptionInfo {
     pub private_key: RsaPrivateKey,
@@ -37,7 +44,9 @@ pub static ENCRYPTION_INFO: Lazy<EncryptionInfo> = Lazy::new(|| {
     let private_key = RsaPrivateKey::new(
         &mut rng,
         usize::try_from(public_key_bits)
-            .context(BadI32ToUsizeConversionSnafu)
+            .context(BadI32ToUsizeConversionSnafu {
+                field_name: "public_key_bits",
+            })
             .unwrap(),
     )
     .context(PrivateKeyGenerationFailedSnafu)
@@ -55,11 +64,13 @@ pub static ENCRYPTION_INFO: Lazy<EncryptionInfo> = Lazy::new(|| {
         public_key_len: public_key_bytes
             .len()
             .try_into()
-            .context(BadUsizeToI32ConversionSnafu)
+            .context(BadUsizeToI32ConversionSnafu {
+                field_name: "public_key_bytes",
+            })
             .unwrap(),
         public_key: public_key_bytes,
         verify_token_length: 4,
-        verify_token: verify_token.clone(),
+        verify_token,
     })
     .unwrap();
 

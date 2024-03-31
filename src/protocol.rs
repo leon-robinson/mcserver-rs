@@ -1,4 +1,10 @@
-use crate::byte_helpers::IntoBytes;
+use crate::{
+    byte_helpers::{vec_to_array, IntoBytes},
+    connection_handler::handle_packet,
+    info, Dec, Enc, ENCRYPTION_INFO,
+};
+use cipher::KeyIvInit;
+use rsa::Pkcs1v15Encrypt;
 use snafu::{prelude::*, ResultExt};
 use std::string::FromUtf8Error;
 use uuid::Uuid;
@@ -15,6 +21,14 @@ use crate::{
 #[snafu(visibility(pub))]
 // TODO: Change field_name to err_info and add packet name to the error message instead of just field name.
 pub enum PacketError {
+    #[snafu(display("Reached the end of read stream"))]
+    EndOfReadStream { field_name: &'static str },
+    #[snafu(display("Failed try_into() for slice"))]
+    BadTryFromSlice {
+        source: std::array::TryFromSliceError,
+    },
+    #[snafu(display("Failed to read bytes for packet"))]
+    BadPacketBytesRead { source: std::io::Error },
     #[snafu(display("Failed to read string for field: '{field_name}' from stream"))]
     BadStringStreamRead {
         source: std::io::Error,
@@ -29,12 +43,6 @@ pub enum PacketError {
     BadStringRange { field_name: &'static str },
     #[snafu(display("String received has bad UTF-16 units for field: '{field_name}'"))]
     BadStringUTF16Units { field_name: &'static str },
-    #[snafu(display("Failed to read into Vec<u8> of length '{len}' for field: '{field_name}'"))]
-    BadByteVecRead {
-        source: std::io::Error,
-        len: usize,
-        field_name: &'static str,
-    },
     #[snafu(display("Failed to read u8 value from stream for field: '{field_name}'"))]
     BadU8Read {
         source: std::io::Error,
@@ -85,8 +93,16 @@ pub enum PacketError {
     FailedByteWritesToStream { source: std::io::Error },
     #[snafu(display("Player name was too long: '{player_name}'"))]
     PlayerNameTooLong { player_name: String },
-    #[snafu(display("Packet was too large, size: '{size}', packet_id '{}'"))]
-    PacketTooLarge { size: i32, packet_id: i32 },
+    #[snafu(display("Packet was too large, packet_len: '{packet_len}', packet_id '{packet_id}'"))]
+    PacketTooLarge { packet_len: i32, packet_id: i32 },
+    #[snafu(display(
+        "Packet was below zero, packet_len: '{packet_len}', packet_id '{packet_id}'"
+    ))]
+    PacketSizeBelowZero { packet_len: i32, packet_id: i32 },
+    #[snafu(display("Packet ID below zero, packet_len: '{packet_len}', packet_id '{packet_id}'"))]
+    PacketIDBelowZero { packet_len: i32, packet_id: i32 },
+    #[snafu(display("Unknown Packet ID, packet_len: '{packet_len}', packet_id: '{packet_id}'"))]
+    UnknownPacketID { packet_len: i32, packet_id: i32 },
     #[snafu(display("Server ID is too long in Encryption Request, server_id: {server_id}"))]
     ServerIDTooLong { server_id: String },
     #[snafu(display("Failed to generate RSA private key"))]
@@ -94,15 +110,45 @@ pub enum PacketError {
     #[snafu(display("Failed to convert public key into Document"))]
     PublicKeyDocumentConversionFailed { source: rsa::pkcs8::spki::Error },
     #[snafu(display("Failed to convert i32 to usize"))]
-    BadI32ToUsizeConversion { source: std::num::TryFromIntError },
+    BadI32ToUsizeConversion {
+        source: std::num::TryFromIntError,
+        field_name: &'static str,
+    },
     #[snafu(display("Failed to convert usize to i32"))]
-    BadUsizeToI32Conversion { source: std::num::TryFromIntError },
+    BadUsizeToI32Conversion {
+        source: std::num::TryFromIntError,
+        field_name: &'static str,
+    },
+    #[snafu(display("Failed to decrypt secret key"))]
+    BadSecretKeyDecryption { source: rsa::Error },
+    #[snafu(display("Failed to decrypt verify token"))]
+    BadVerifyTokenDecryption { source: rsa::Error },
+    #[snafu(display("Decrypted verify token length was bad"))]
+    BadDecryptedVerifyTokenLength,
+    #[snafu(display("Decrypted secret key length was bad"))]
+    BadDecryptedSecretKeyLength,
+    #[snafu(display("The verify tokens did not match"))]
+    BadVerifyTokenComparison,
+    #[snafu(display("Failed to create encryptor"))]
+    BadEncryptorCreation { source: cipher::InvalidLength },
+    #[snafu(display("Failed to create decryptor"))]
+    BadDecryptorCreation { source: cipher::InvalidLength },
 }
 
 pub type Result<T, E = PacketError> = std::result::Result<T, E>;
 
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct Property {
+    pub name: String,
+    pub value: String,
+    pub is_signed: bool,
+    pub signature: Option<String>, // Must be Some if is_signed is true.
+}
+
 pub trait ServerboundPacket: Sized {
     fn from_connection(connection: &mut Connection) -> Result<Self>;
+    fn handle(&self, connection: &mut Connection) -> Result<()>;
 }
 
 pub trait ClientboundPacket: Sized {
@@ -110,7 +156,7 @@ pub trait ClientboundPacket: Sized {
 }
 
 back_to_enum! {
-    #[derive(Debug)]
+    #[derive(Debug, Clone, Copy)]
     pub enum State {
         Unset = 0, // Not actually in the Minecraft protocol, just means that the Handshake has not been sent by the client yet.
         Status = 1,
@@ -144,6 +190,21 @@ impl ServerboundPacket for HandshakePacket {
             next_state,
         })
     }
+
+    fn handle(&self, connection: &mut Connection) -> Result<()> {
+        info!(
+            "Got handshake, they are connecting with {}:{} on protocol version {}, next state is {}.",
+            self.server_address,
+            self.server_port,
+            self.protocol_version,
+            self.next_state
+        );
+
+        connection.state = self.next_state;
+
+        handle_packet(connection)?; // After receiving the initial HandshakePacket, a Login Start or Status Request packet will follow.
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -156,16 +217,31 @@ pub struct LoginStart {
 impl ServerboundPacket for LoginStart {
     fn from_connection(connection: &mut Connection) -> Result<Self> {
         let name = connection.read_utf8_string("name")?;
+        let uuid = connection.read_uuid("uuid")?;
 
         ensure!(
             name.len() <= 16,
             PlayerNameTooLongSnafu { player_name: name }
         );
 
-        Ok(Self {
-            name,
-            uuid: connection.read_uuid("uuid")?,
-        })
+        connection.username = Some(name.clone());
+        connection.uuid = Some(uuid);
+
+        Ok(Self { name, uuid })
+    }
+
+    fn handle(&self, connection: &mut Connection) -> Result<()> {
+        info!("Now on LOGIN state.");
+
+        info!("{self:?}");
+        // TODO: Set name & UUID in connection.
+
+        connection.write_bytes_force_unencrypted(&ENCRYPTION_INFO.encryption_request_bytes)?;
+        connection.flush()?;
+
+        info!("Sent encryption request.");
+
+        Ok(())
     }
 }
 
@@ -180,6 +256,25 @@ impl ServerboundPacket for PingRequest {
         Ok(Self {
             sys_time_millis: connection.read_i64("sys_time_millis")?,
         })
+    }
+
+    fn handle(&self, connection: &mut Connection) -> Result<()> {
+        info!("Got PingRequest with millis: {}", self.sys_time_millis);
+
+        connection.write_bytes(
+            PingResponse::to_bytes(PingResponse {
+                sys_time_millis: self.sys_time_millis,
+            })?
+            .as_mut_slice(),
+        )?;
+        connection.flush()?;
+
+        info!(
+            "Sent back PingResponse with millis: {}",
+            self.sys_time_millis
+        );
+
+        Ok(())
     }
 }
 
@@ -197,12 +292,16 @@ impl ServerboundPacket for EncryptionResponse {
         let shared_secret_length = connection.read_var_int("shared_secret_length")?;
         let shared_secret = connection.read_bytes(
             "shared_secret",
-            usize::try_from(shared_secret_length).context(BadI32ToUsizeConversionSnafu)?,
+            usize::try_from(shared_secret_length).context(BadI32ToUsizeConversionSnafu {
+                field_name: "shared_secret",
+            })?,
         )?;
         let verify_token_length = connection.read_var_int("verify_token_length")?;
         let verify_token = connection.read_bytes(
             "verify_token",
-            usize::try_from(verify_token_length).context(BadI32ToUsizeConversionSnafu)?,
+            usize::try_from(verify_token_length).context(BadI32ToUsizeConversionSnafu {
+                field_name: "verify_token",
+            })?,
         )?;
 
         Ok(Self {
@@ -211,6 +310,50 @@ impl ServerboundPacket for EncryptionResponse {
             verify_token_length,
             verify_token,
         })
+    }
+
+    fn handle(&self, connection: &mut Connection) -> Result<()> {
+        let secret_key_encrypted = &self.shared_secret;
+        let secret_key = ENCRYPTION_INFO
+            .private_key
+            .decrypt(Pkcs1v15Encrypt, secret_key_encrypted)
+            .context(BadSecretKeyDecryptionSnafu)?;
+        let verify_token_encrypted = &self.verify_token;
+        let verify_token = ENCRYPTION_INFO
+            .private_key
+            .decrypt(Pkcs1v15Encrypt, verify_token_encrypted)
+            .context(BadVerifyTokenDecryptionSnafu)?;
+
+        ensure!(verify_token.len() == 4, BadDecryptedVerifyTokenLengthSnafu);
+        ensure!(secret_key.len() == 16, BadDecryptedSecretKeyLengthSnafu);
+        ensure!(
+            verify_token.as_slice() == ENCRYPTION_INFO.verify_token,
+            BadVerifyTokenComparisonSnafu
+        );
+
+        let key: [u8; 16] = vec_to_array(secret_key);
+
+        let enc = Enc::new_from_slices(&key, &key).context(BadEncryptorCreationSnafu)?;
+        let dec = Dec::new_from_slices(&key, &key).context(BadDecryptorCreationSnafu)?;
+
+        connection.enc = Some(enc);
+        connection.dec = Some(dec);
+
+        info!("Set encryptor and decryptor, sending Login Success");
+
+        // TODO: properties
+        connection.write_bytes(
+            LoginSuccess::to_bytes(LoginSuccess {
+                uuid: connection.uuid.unwrap(),
+                username: connection.username.clone().unwrap(),
+                properties_length: 0,
+                properties: None,
+            })?
+            .as_mut_slice(),
+        )?;
+        connection.flush()?;
+
+        Ok(())
     }
 }
 
@@ -265,8 +408,8 @@ impl ClientboundPacket for StatusResponse {
         );
 
         let mut s = create_utf8_string("json_status", &response_json)?;
-        let mut packet_id = create_var_int(0)?; // TODO: Cache these.
-        let mut packet_start = create_var_int(sum_usize_to_i32!(packet_id.len(), s.len()))?;
+        let mut packet_id = create_var_int(0x00); // TODO: Cache these.
+        let mut packet_start = create_var_int(sum_usize_to_i32!(packet_id.len(), s.len()));
 
         packet_start.append(&mut packet_id);
         packet_start.append(&mut s);
@@ -284,9 +427,9 @@ pub struct PingResponse {
 impl ClientboundPacket for PingResponse {
     fn to_bytes(packet: Self) -> Result<Vec<u8>> {
         let mut sys_time_millis = i64::to_mc_bytes(packet.sys_time_millis);
-        let mut packet_id = create_var_int(1)?;
+        let mut packet_id = create_var_int(0x01);
         let mut packet_start =
-            create_var_int(sum_usize_to_i32!(packet_id.len(), sys_time_millis.len()))?;
+            create_var_int(sum_usize_to_i32!(packet_id.len(), sys_time_millis.len()));
 
         packet_start.append(&mut packet_id);
         packet_start.append(&mut sys_time_millis);
@@ -315,11 +458,11 @@ impl ClientboundPacket for EncryptionRequest {
         );
 
         let mut server_id = create_utf8_string("server_id", &packet.server_id)?;
-        let mut public_key_len = create_var_int(packet.public_key_len)?;
+        let mut public_key_len = create_var_int(packet.public_key_len);
         let mut public_key = packet.public_key;
-        let mut verify_token_length = create_var_int(packet.verify_token_length)?;
+        let mut verify_token_length = create_var_int(packet.verify_token_length);
         let verify_token = packet.verify_token;
-        let mut packet_id = create_var_int(1)?;
+        let mut packet_id = create_var_int(0x01);
         let mut packet_start = create_var_int(sum_usize_to_i32!(
             packet_id.len(),
             server_id.len(),
@@ -327,7 +470,7 @@ impl ClientboundPacket for EncryptionRequest {
             public_key.len(),
             verify_token_length.len(),
             verify_token.len()
-        ))?;
+        ));
 
         packet_start.append(&mut packet_id);
         packet_start.append(&mut server_id);
@@ -335,6 +478,55 @@ impl ClientboundPacket for EncryptionRequest {
         packet_start.append(&mut public_key);
         packet_start.append(&mut verify_token_length);
         packet_start.extend_from_slice(&verify_token);
+
+        Ok(packet_start)
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct LoginSuccess {
+    pub uuid: Uuid,
+    pub username: String,
+    pub properties_length: i32,
+    pub properties: Option<Vec<Property>>,
+}
+
+impl ClientboundPacket for LoginSuccess {
+    fn to_bytes(packet: Self) -> Result<Vec<u8>> {
+        ensure!(
+            packet.username.len() <= 16,
+            PlayerNameTooLongSnafu {
+                player_name: packet.username
+            }
+        );
+
+        let uuid = packet.uuid.into_bytes();
+        let mut username = create_utf8_string("username", &packet.username)?;
+        // TODO: actually implement properties
+        let mut properties_length = create_var_int(1);
+        let mut packet_id = create_var_int(0x02);
+
+        let mut textures = create_utf8_string("name", "textures")?;
+        let mut value = create_utf8_string("value", "ewogICJ0aW1lc3RhbXAiIDogMTcxMTg4NzYyMzA5MywKICAicHJvZmlsZUlkIiA6ICI2OTI4NTg3ZjFiMjE0NzAzYmM3OWUzZWZiYWU2ZTRhOSIsCiAgInByb2ZpbGVOYW1lIiA6ICJsZW9ucm9iaSIsCiAgInNpZ25hdHVyZVJlcXVpcmVkIiA6IHRydWUsCiAgInRleHR1cmVzIiA6IHsKICAgICJTS0lOIiA6IHsKICAgICAgInVybCIgOiAiaHR0cDovL3RleHR1cmVzLm1pbmVjcmFmdC5uZXQvdGV4dHVyZS83ZmEyOGNkZjhjMWQ1NzE3NTFiM2FhZWNkM2IwYmU2MGMzMTkyNmQ1YWY4NjVmMjc5YzNlZmU1MWI5Nzc2N2ExIgogICAgfQogIH0KfQ==")?;
+        let mut is_signed = bool::to_mc_bytes(false);
+        let mut packet_start = create_var_int(sum_usize_to_i32!(
+            packet_id.len(),
+            uuid.len(),
+            username.len(),
+            properties_length.len(),
+            textures.len(),
+            value.len(),
+            is_signed.len()
+        ));
+
+        packet_start.append(&mut packet_id);
+        packet_start.extend_from_slice(&uuid);
+        packet_start.append(&mut username);
+        packet_start.append(&mut properties_length);
+        packet_start.append(&mut textures);
+        packet_start.append(&mut value);
+        packet_start.append(&mut is_signed);
 
         Ok(packet_start)
     }
