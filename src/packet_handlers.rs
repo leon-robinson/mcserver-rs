@@ -1,3 +1,5 @@
+#![allow(clippy::unnecessary_wraps)]
+
 use crate::{
     connection_handler::Connection,
     info,
@@ -11,7 +13,12 @@ use crate::{
 // True if should keep connection alive, false if should close the connection.
 pub type PacketHandler = fn(&mut Connection, i32) -> Result<bool>;
 
-pub static PACKET_HANDLERS: [PacketHandler; 2] = [packet_handler_0x00, packet_handler_0x01];
+pub static PACKET_HANDLERS: [PacketHandler; 4] = [
+    packet_handler_0x00,
+    packet_handler_0x01,
+    packet_handler_0x02,
+    packet_handler_0x03,
+];
 
 fn packet_handler_0x00(connection: &mut Connection, _packet_len: i32) -> Result<bool> {
     match connection.state {
@@ -39,6 +46,9 @@ fn packet_handler_0x00(connection: &mut Connection, _packet_len: i32) -> Result<
         State::Login => {
             LoginStart::from_connection(connection)?.handle(connection)?;
         }
+        State::Configuration => {
+            warn!("Got 0x00 packet during State::Configuration");
+        }
     }
 
     Ok(true)
@@ -53,10 +63,28 @@ fn packet_handler_0x01(connection: &mut Connection, _packet_len: i32) -> Result<
         State::Login => {
             EncryptionResponse::from_connection(connection)?.handle(connection)?;
         }
-        State::Unset => {
-            warn!("Got packet_id 0x01 during State::Unset");
+        _ => {
+            warn!("Got packet_id 0x01 during state: '{}'", connection.state);
         }
     };
 
+    Ok(true)
+}
+
+fn packet_handler_0x02(_connection: &mut Connection, _packet_len: i32) -> Result<bool> {
+    Ok(true)
+}
+
+fn packet_handler_0x03(connection: &mut Connection, _packet_len: i32) -> Result<bool> {
+    match connection.state {
+        State::Login => {
+            connection.login_acknowledged = true;
+            connection.state = State::Configuration;
+            info!("Received Login Acknowledged from the client, setting state to Configuration.");
+        }
+        _ => {
+            warn!("Got packet 0x03 while not in Login state.");
+        }
+    }
     Ok(true)
 }

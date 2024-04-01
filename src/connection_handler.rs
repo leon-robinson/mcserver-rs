@@ -7,10 +7,10 @@ use uuid::Uuid;
 use crate::byte_helpers::{CONTINUE_BITS, SEGMENT_BITS};
 use crate::crypto::{decrypt_inout, encrypt_inout};
 use crate::packet_handlers;
-use crate::protocol::PacketIDBelowZeroSnafu;
 use crate::protocol::PacketSizeBelowZeroSnafu;
 use crate::protocol::UnknownPacketIDSnafu;
 use crate::protocol::{BadI32ToUsizeConversionSnafu, BadU8ReadSnafu};
+use crate::protocol::{BadPacketHandlerReadsSnafu, PacketIDBelowZeroSnafu};
 use crate::protocol::{BadUsizeToI32ConversionSnafu, VarIntTooLargeSnafu};
 use crate::read_stream::ReadStream;
 use crate::Dec;
@@ -30,6 +30,7 @@ pub struct Connection {
     pub username: Option<String>, // None if we are in the Handshake stage or it's a ping connection.
     pub enc: Option<Enc>,
     pub dec: Option<Dec>,
+    pub login_acknowledged: bool, // Set true after the Login Acknowledged packet is received from the client.
 }
 
 impl Connection {
@@ -85,6 +86,16 @@ impl Connection {
     #[inline]
     pub fn read_var_int(&mut self, field_name: &'static str) -> Result<i32> {
         self.read_stream.read_var_int(field_name)
+    }
+
+    /// Read the first `VarInt` from the `ReadStream` and also return the amount of bytes the `VarInt` takes up.
+    ///
+    /// 0: The `VarInt`
+    ///
+    /// 1: The `VarInt` length in bytes.
+    #[inline]
+    pub fn read_var_int_and_len(&mut self, field_name: &'static str) -> Result<(i32, i32)> {
+        self.read_stream.read_var_int_and_len(field_name)
     }
 
     /// Read the first `VarLong` from the `ReadStream`
@@ -211,7 +222,9 @@ pub fn handle_packet(connection: &mut Connection) -> Result<bool> {
         connection.read_var_int("packet_len")?
     };
 
-    let packet_id = connection.read_var_int("packet_id")?;
+    let packet_id_tup = connection.read_var_int_and_len("packet_id")?;
+    let packet_id = packet_id_tup.0;
+    let packet_id_len = packet_id_tup.1;
 
     ensure!(
         packet_len <= 2_097_151,
@@ -254,8 +267,32 @@ pub fn handle_packet(connection: &mut Connection) -> Result<bool> {
         usize::try_from(packet_id).context(BadI32ToUsizeConversionSnafu {
             field_name: "packet_id",
         })?;
+    // Keep track of how many bytes the handler reads so we can check if the handler reads the whole packet,
+    // if it doesn't, we have a problem.
+    let read_stream_len_before = connection.read_stream.data.len();
+
     let keep_alive =
         packet_handlers::PACKET_HANDLERS[packet_handler_index](connection, packet_len)?;
+
+    let read_stream_len_after = connection.read_stream.data.len();
+
+    let read_stream_len_diff = read_stream_len_before - read_stream_len_after;
+    let expected_bytes_read =
+        usize::try_from(packet_len - packet_id_len).context(BadI32ToUsizeConversionSnafu {
+            field_name: "expected_bytes_read",
+        })?;
+
+    // Ensure that the packet handler read the same amount of bytes as the packet_len - packet_id_len.
+    // NOTE: We subtract the packet_id_len from packet_len as the packet_len includes the amount of bytes
+    //       from the packet_id as well, which the packet handler doesn't read as we already have above.
+    ensure!(
+        read_stream_len_diff == expected_bytes_read,
+        BadPacketHandlerReadsSnafu {
+            packet_id,
+            expected_bytes_read,
+            actual_bytes_read: read_stream_len_diff
+        }
+    );
 
     Ok(keep_alive)
 }
@@ -283,6 +320,7 @@ pub fn handle_connection(stream: TcpStream) {
         username: None,
         enc: None,
         dec: None,
+        login_acknowledged: false,
     };
 
     loop {

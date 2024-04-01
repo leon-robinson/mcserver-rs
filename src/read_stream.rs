@@ -111,13 +111,21 @@ impl ReadStream {
 
     /// Algorithm from: <https://wiki.vg/Protocol#VarInt_and_VarLong>
     pub fn read_var_int(&mut self, field_name: &'static str) -> Result<i32> {
+        Ok(self.read_var_int_and_len(field_name)?.0)
+    }
+
+    /// Algorithm from: <https://wiki.vg/Protocol#VarInt_and_VarLong>
+    pub fn read_var_int_and_len(&mut self, field_name: &'static str) -> Result<(i32, i32)> {
         let mut value: i32 = 0;
         let mut pos = 0;
+        let mut total_bytes = 0;
         let mut current_byte: u8;
 
         loop {
             current_byte = self.read_u8(field_name)?;
             value |= ((i32::from(current_byte)) & SEGMENT_BITS) << pos;
+
+            total_bytes += 1;
 
             if ((i32::from(current_byte)) & CONTINUE_BITS) == 0 {
                 break;
@@ -128,7 +136,7 @@ impl ReadStream {
             ensure!(pos < 32, VarIntTooLargeSnafu { field_name });
         }
 
-        Ok(value)
+        Ok((value, total_bytes))
     }
 
     /// Algorithm from:  <https://wiki.vg/Protocol#VarInt_and_VarLong>

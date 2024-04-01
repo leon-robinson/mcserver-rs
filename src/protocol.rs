@@ -133,6 +133,14 @@ pub enum PacketError {
     BadEncryptorCreation { source: cipher::InvalidLength },
     #[snafu(display("Failed to create decryptor"))]
     BadDecryptorCreation { source: cipher::InvalidLength },
+    #[snafu(display(
+        "The packet handler did not read all the bytes from the packet, packet_id: {packet_id}"
+    ))]
+    BadPacketHandlerReads {
+        packet_id: i32,
+        expected_bytes_read: usize,
+        actual_bytes_read: usize,
+    },
 }
 
 pub type Result<T, E = PacketError> = std::result::Result<T, E>;
@@ -158,6 +166,7 @@ pub trait ClientboundPacket: Sized {
 back_to_enum! {
     #[derive(Debug, Clone, Copy)]
     pub enum State {
+        Configuration = -1, // No value correlates with the Configuration state, so set it to -1.
         Unset = 0, // Not actually in the Minecraft protocol, just means that the Handshake has not been sent by the client yet.
         Status = 1,
         Login = 2,
@@ -290,6 +299,7 @@ pub struct EncryptionResponse {
 impl ServerboundPacket for EncryptionResponse {
     fn from_connection(connection: &mut Connection) -> Result<Self> {
         let shared_secret_length = connection.read_var_int("shared_secret_length")?;
+
         let shared_secret = connection.read_bytes(
             "shared_secret",
             usize::try_from(shared_secret_length).context(BadI32ToUsizeConversionSnafu {
