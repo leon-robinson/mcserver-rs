@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::byte_helpers::{CONTINUE_BITS, SEGMENT_BITS};
 use crate::crypto::{decrypt_inout, encrypt_inout};
+use crate::identifier::Identifier;
 use crate::packet_handlers;
 use crate::protocol::PacketSizeBelowZeroSnafu;
 use crate::protocol::UnknownPacketIDSnafu;
@@ -110,10 +111,41 @@ impl Connection {
         self.read_stream.read_utf8_string(field_name)
     }
 
+    /// Read the first UTF-8 String from the `ReadStream` and also return the amount of bytes the `String` takes up
+    /// in the packet.
+    ///
+    /// 0: The `String`
+    ///
+    /// 1: The `VarInt` length in bytes.
+    #[inline]
+    pub fn read_utf8_string_and_len(&mut self, field_name: &'static str) -> Result<(String, i32)> {
+        self.read_stream.read_utf8_string_and_len(field_name)
+    }
+
     /// Read the first `Uuid` from the `ReadStream`
     #[inline]
     pub fn read_uuid(&mut self, field_name: &'static str) -> Result<Uuid> {
         self.read_stream.read_uuid(field_name)
+    }
+
+    /// Read the first `Identifier` from the `ReadStream`
+    #[inline]
+    pub fn read_identifier(&mut self, field_name: &'static str) -> Result<Identifier> {
+        self.read_stream.read_identifier(field_name)
+    }
+
+    /// Read the first `Identifier` from the `ReadStream` and also return the amount of bytes the `Identifier` takes up
+    /// in the packet.
+    ///
+    /// 0: The `Identifier`
+    ///
+    /// 1: The `VarInt` length in bytes.
+    #[inline]
+    pub fn read_identifier_and_len(
+        &mut self,
+        field_name: &'static str,
+    ) -> Result<(Identifier, i32)> {
+        self.read_stream.read_identifier_and_len(field_name)
     }
 
     #[inline]
@@ -185,6 +217,8 @@ impl Connection {
 ///
 /// Return true if should keep connection alive, false if should close the connection.
 pub fn handle_packet(connection: &mut Connection) -> Result<bool> {
+    // TODO: ensure client logged in after certain packet.
+
     let packet_len = if connection.read_stream.data.is_empty() {
         let packet_len = connection.read_var_int_directly("packet_len")?;
 
@@ -271,16 +305,17 @@ pub fn handle_packet(connection: &mut Connection) -> Result<bool> {
     // if it doesn't, we have a problem.
     let read_stream_len_before = connection.read_stream.data.len();
 
-    let keep_alive =
-        packet_handlers::PACKET_HANDLERS[packet_handler_index](connection, packet_len)?;
-
-    let read_stream_len_after = connection.read_stream.data.len();
-
-    let read_stream_len_diff = read_stream_len_before - read_stream_len_after;
     let expected_bytes_read =
         usize::try_from(packet_len - packet_id_len).context(BadI32ToUsizeConversionSnafu {
             field_name: "expected_bytes_read",
         })?;
+
+    let keep_alive =
+        packet_handlers::PACKET_HANDLERS[packet_handler_index](connection, expected_bytes_read)?;
+
+    let read_stream_len_after = connection.read_stream.data.len();
+
+    let read_stream_len_diff = read_stream_len_before - read_stream_len_after;
 
     // Ensure that the packet handler read the same amount of bytes as the packet_len - packet_id_len.
     // NOTE: We subtract the packet_id_len from packet_len as the packet_len includes the amount of bytes

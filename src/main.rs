@@ -25,6 +25,7 @@ pub type Dec = cfb8::Decryptor<Aes128>;
 pub mod byte_helpers;
 pub mod connection_handler;
 pub mod crypto;
+pub mod identifier;
 pub mod log;
 pub mod macros;
 pub mod packet_handlers;
@@ -85,7 +86,10 @@ fn main() {
     let tcp_listener =
         TcpListener::bind(format!("{BIND_IP}:{PORT}")).expect("Failed to bind TcpListener.");
 
+    // Initialize Lazy statics before taking connections.
     Lazy::force(&ENCRYPTION_INFO);
+    Lazy::force(&identifier::NAMESPACE_RULES);
+    Lazy::force(&identifier::VALUE_RULES);
 
     // TODO: Use a thread pool.
     for stream in tcp_listener.incoming() {

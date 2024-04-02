@@ -1,17 +1,19 @@
 #![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::match_wildcard_for_single_variants)]
 
 use crate::{
     connection_handler::Connection,
     info,
     protocol::{
         ClientboundPacket, EncryptionResponse, HandshakePacket, LoginStart, PingRequest, Result,
-        ServerboundPacket, State, StatusResponse,
+        ServerboundPacket, ServerboundPluginMessage, State, StatusResponse,
     },
     warn,
 };
 
 // True if should keep connection alive, false if should close the connection.
-pub type PacketHandler = fn(&mut Connection, i32) -> Result<bool>;
+// NOTE: Packet len is second argument, and does not include the packet_id length.
+pub type PacketHandler = fn(&mut Connection, usize) -> Result<bool>;
 
 pub static PACKET_HANDLERS: [PacketHandler; 4] = [
     packet_handler_0x00,
@@ -20,10 +22,10 @@ pub static PACKET_HANDLERS: [PacketHandler; 4] = [
     packet_handler_0x03,
 ];
 
-fn packet_handler_0x00(connection: &mut Connection, _packet_len: i32) -> Result<bool> {
+fn packet_handler_0x00(connection: &mut Connection, packet_len: usize) -> Result<bool> {
     match connection.state {
         State::Unset => {
-            HandshakePacket::from_connection(connection)?.handle(connection)?;
+            HandshakePacket::from_connection(connection, packet_len)?.handle(connection)?;
         }
         State::Status => {
             // TODO: Cache the packet instead of creating it every request.
@@ -44,7 +46,7 @@ fn packet_handler_0x00(connection: &mut Connection, _packet_len: i32) -> Result<
             info!("Sent back StatusReponse packet.");
         }
         State::Login => {
-            LoginStart::from_connection(connection)?.handle(connection)?;
+            LoginStart::from_connection(connection, packet_len)?.handle(connection)?;
         }
         State::Configuration => {
             warn!("Got 0x00 packet during State::Configuration");
@@ -54,14 +56,18 @@ fn packet_handler_0x00(connection: &mut Connection, _packet_len: i32) -> Result<
     Ok(true)
 }
 
-fn packet_handler_0x01(connection: &mut Connection, _packet_len: i32) -> Result<bool> {
+fn packet_handler_0x01(connection: &mut Connection, packet_len: usize) -> Result<bool> {
     match connection.state {
         State::Status => {
-            PingRequest::from_connection(connection)?.handle(connection)?;
+            PingRequest::from_connection(connection, packet_len)?.handle(connection)?;
             return Ok(false);
         }
         State::Login => {
-            EncryptionResponse::from_connection(connection)?.handle(connection)?;
+            EncryptionResponse::from_connection(connection, packet_len)?.handle(connection)?;
+        }
+        State::Configuration => {
+            ServerboundPluginMessage::from_connection(connection, packet_len)?
+                .handle(connection)?;
         }
         _ => {
             warn!("Got packet_id 0x01 during state: '{}'", connection.state);
@@ -71,11 +77,11 @@ fn packet_handler_0x01(connection: &mut Connection, _packet_len: i32) -> Result<
     Ok(true)
 }
 
-fn packet_handler_0x02(_connection: &mut Connection, _packet_len: i32) -> Result<bool> {
+fn packet_handler_0x02(_connection: &mut Connection, _packet_len: usize) -> Result<bool> {
     Ok(true)
 }
 
-fn packet_handler_0x03(connection: &mut Connection, _packet_len: i32) -> Result<bool> {
+fn packet_handler_0x03(connection: &mut Connection, _packet_len: usize) -> Result<bool> {
     match connection.state {
         State::Login => {
             connection.login_acknowledged = true;

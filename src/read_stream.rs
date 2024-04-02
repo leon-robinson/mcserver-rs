@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     byte_helpers::{CONTINUE_BITS, SEGMENT_BITS},
+    identifier::Identifier,
     protocol::{
         BadStringConversionSnafu, BadStringRangeSnafu, BadStringUTF16UnitsSnafu,
         BadTryFromSliceSnafu, EndOfReadStreamSnafu, Result, VarIntTooLargeSnafu,
@@ -167,12 +168,33 @@ impl ReadStream {
         Ok(Uuid::from_bytes(buf))
     }
 
+    pub fn read_identifier(&mut self, field_name: &'static str) -> Result<Identifier> {
+        Identifier::try_from(self.read_utf8_string(field_name)?)
+    }
+
+    pub fn read_identifier_and_len(
+        &mut self,
+        field_name: &'static str,
+    ) -> Result<(Identifier, i32)> {
+        let string_and_len = self.read_utf8_string_and_len(field_name)?;
+        Ok((Identifier::try_from(string_and_len.0)?, string_and_len.1))
+    }
+
+    /// Implementation from 'Notes' from: <https://wiki.vg/Protocol#Type:String>
+    ///
+    /// Note that `field_name` is just for extra info when logging if there is an error.
+    pub fn read_utf8_string(&mut self, field_name: &'static str) -> Result<String> {
+        Ok(self.read_utf8_string_and_len(field_name)?.0)
+    }
+
     /// Implementation from 'Notes' from: <https://wiki.vg/Protocol#Type:String>
     ///
     /// Note that `field_name` is just for extra info when logging if there is an error.
     #[allow(clippy::cast_sign_loss)] // We already check that the string length is between 0..=32767
-    pub fn read_utf8_string(&mut self, field_name: &'static str) -> Result<String> {
-        let string_len_bytes = self.read_var_int(field_name)?;
+    pub fn read_utf8_string_and_len(&mut self, field_name: &'static str) -> Result<(String, i32)> {
+        let string_len_bytes_tup = self.read_var_int_and_len(field_name)?;
+        let string_len_bytes = string_len_bytes_tup.0;
+        let string_len_bytes_len = string_len_bytes_tup.1;
 
         ensure!(
             (0..=32767).contains(&string_len_bytes),
@@ -191,7 +213,10 @@ impl ReadStream {
             BadStringUTF16UnitsSnafu { field_name }
         );
 
-        Ok(utf8_string)
+        // string_len_bytes_len is just the amount of bytes that the `length` field of the string takes up.
+        // When we add that together with the string_len_bytes (total bytes in String) we know how many
+        // bytes makes up the packet standard `String` object.
+        Ok((utf8_string, string_len_bytes_len + string_len_bytes))
     }
 }
 

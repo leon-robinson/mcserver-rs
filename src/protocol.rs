@@ -1,7 +1,10 @@
 use crate::{
     byte_helpers::{vec_to_array, IntoBytes},
     connection_handler::handle_packet,
-    info, Dec, Enc, ENCRYPTION_INFO,
+    identifier::Identifier,
+    info,
+    read_stream::ReadStream,
+    Dec, Enc, ENCRYPTION_INFO,
 };
 use cipher::KeyIvInit;
 use rsa::Pkcs1v15Encrypt;
@@ -141,6 +144,22 @@ pub enum PacketError {
         expected_bytes_read: usize,
         actual_bytes_read: usize,
     },
+    #[snafu(display("Player attempting to connect with username '{username}' skipped login"))]
+    ClientSkippedLogin { username: String },
+    #[snafu(display("Identifier creation failed, bad namespace, namespace was '{namespace}', sent_by_client='{sent_by_client}'"))]
+    BadNewIdentifierNamespace {
+        namespace: String,
+        sent_by_client: bool,
+    },
+    #[snafu(display("Identifier creation failed, bad value, value was '{value}', sent_by_client='{sent_by_client}'"))]
+    BadNewIdentifierValue { value: String, sent_by_client: bool },
+    #[snafu(display("Identifier creation failed, was too long: '{identifier:?}', sent_by_client='{sent_by_client}'"))]
+    BadNewIdentifierLength {
+        identifier: Identifier,
+        sent_by_client: bool,
+    },
+    #[snafu(display("Too many or too little ':' in identifier: '{identifier_raw}'"))]
+    IdentifierStrangeColons { identifier_raw: String },
 }
 
 pub type Result<T, E = PacketError> = std::result::Result<T, E>;
@@ -155,8 +174,9 @@ pub struct Property {
 }
 
 pub trait ServerboundPacket: Sized {
-    fn from_connection(connection: &mut Connection) -> Result<Self>;
-    fn handle(&self, connection: &mut Connection) -> Result<()>;
+    // NOTE: packet_len does not include packet_id length.
+    fn from_connection(connection: &mut Connection, packet_len: usize) -> Result<Self>;
+    fn handle(self, connection: &mut Connection) -> Result<()>;
 }
 
 pub trait ClientboundPacket: Sized {
@@ -183,7 +203,7 @@ pub struct HandshakePacket {
 }
 
 impl ServerboundPacket for HandshakePacket {
-    fn from_connection(connection: &mut Connection) -> Result<Self> {
+    fn from_connection(connection: &mut Connection, _packet_len: usize) -> Result<Self> {
         let protocol_version = connection.read_var_int("protocol_version")?;
         let server_address = connection.read_utf8_string("server_address")?;
         let server_port = connection.read_u16("server_port")?;
@@ -200,7 +220,7 @@ impl ServerboundPacket for HandshakePacket {
         })
     }
 
-    fn handle(&self, connection: &mut Connection) -> Result<()> {
+    fn handle(self, connection: &mut Connection) -> Result<()> {
         info!(
             "Got handshake, they are connecting with {}:{} on protocol version {}, next state is {}.",
             self.server_address,
@@ -224,7 +244,7 @@ pub struct LoginStart {
 }
 
 impl ServerboundPacket for LoginStart {
-    fn from_connection(connection: &mut Connection) -> Result<Self> {
+    fn from_connection(connection: &mut Connection, _packet_len: usize) -> Result<Self> {
         let name = connection.read_utf8_string("name")?;
         let uuid = connection.read_uuid("uuid")?;
 
@@ -239,7 +259,7 @@ impl ServerboundPacket for LoginStart {
         Ok(Self { name, uuid })
     }
 
-    fn handle(&self, connection: &mut Connection) -> Result<()> {
+    fn handle(self, connection: &mut Connection) -> Result<()> {
         info!("Now on LOGIN state.");
 
         info!("{self:?}");
@@ -261,13 +281,13 @@ pub struct PingRequest {
 }
 
 impl ServerboundPacket for PingRequest {
-    fn from_connection(connection: &mut Connection) -> Result<Self> {
+    fn from_connection(connection: &mut Connection, _packet_len: usize) -> Result<Self> {
         Ok(Self {
             sys_time_millis: connection.read_i64("sys_time_millis")?,
         })
     }
 
-    fn handle(&self, connection: &mut Connection) -> Result<()> {
+    fn handle(self, connection: &mut Connection) -> Result<()> {
         info!("Got PingRequest with millis: {}", self.sys_time_millis);
 
         connection.write_bytes(
@@ -297,7 +317,7 @@ pub struct EncryptionResponse {
 }
 
 impl ServerboundPacket for EncryptionResponse {
-    fn from_connection(connection: &mut Connection) -> Result<Self> {
+    fn from_connection(connection: &mut Connection, _packet_len: usize) -> Result<Self> {
         let shared_secret_length = connection.read_var_int("shared_secret_length")?;
 
         let shared_secret = connection.read_bytes(
@@ -322,7 +342,7 @@ impl ServerboundPacket for EncryptionResponse {
         })
     }
 
-    fn handle(&self, connection: &mut Connection) -> Result<()> {
+    fn handle(self, connection: &mut Connection) -> Result<()> {
         let secret_key_encrypted = &self.shared_secret;
         let secret_key = ENCRYPTION_INFO
             .private_key
@@ -362,6 +382,41 @@ impl ServerboundPacket for EncryptionResponse {
             .as_mut_slice(),
         )?;
         connection.flush()?;
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ServerboundPluginMessage {
+    pub channel: Identifier,
+    pub data: Vec<u8>,
+}
+
+impl ServerboundPacket for ServerboundPluginMessage {
+    fn from_connection(connection: &mut Connection, packet_len: usize) -> Result<Self> {
+        let channel_and_len = connection.read_identifier_and_len("channel")?;
+        let channel = channel_and_len.0;
+        let channel_len: usize =
+            channel_and_len
+                .1
+                .try_into()
+                .context(BadI32ToUsizeConversionSnafu {
+                    field_name: "channel_len",
+                })?;
+        let data_len = packet_len - channel_len;
+
+        let data = connection.read_bytes("data", data_len)?;
+
+        Ok(Self { channel, data })
+    }
+
+    fn handle(self, _connection: &mut Connection) -> Result<()> {
+        info!("{self:?}");
+
+        let mut data_read_stream = ReadStream { data: self.data };
+        info!("GOT DATA: {}", data_read_stream.read_utf8_string("data")?);
 
         Ok(())
     }
