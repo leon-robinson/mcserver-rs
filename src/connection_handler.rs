@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::net::IpAddr;
 use std::{io::Write, net::TcpStream};
 
 use snafu::{ensure, ResultExt};
@@ -7,7 +8,6 @@ use uuid::Uuid;
 use crate::byte_helpers::{CONTINUE_BITS, SEGMENT_BITS};
 use crate::crypto::{decrypt_inout, encrypt_inout};
 use crate::identifier::Identifier;
-use crate::packet_handlers;
 use crate::protocol::PacketSizeBelowZeroSnafu;
 use crate::protocol::UnknownPacketIDSnafu;
 use crate::protocol::{BadI32ToUsizeConversionSnafu, BadU8ReadSnafu};
@@ -21,17 +21,21 @@ use crate::{
     protocol::{FailedToFlushStreamSnafu, PacketTooLargeSnafu, Result, State},
     STREAM_READ_TIMEOUT, STREAM_WRITE_TIMEOUT,
 };
+use crate::{packet_handlers, warn};
 
 #[derive(Debug)]
 pub struct Connection {
     pub tcp_stream: TcpStream,
     pub read_stream: ReadStream,
+    pub ip_addr: IpAddr,
+    pub port: u16,
     pub state: State,
     pub uuid: Option<Uuid>, // None if we are in the Handshake stage or it's a ping connection.
     pub username: Option<String>, // None if we are in the Handshake stage or it's a ping connection.
     pub enc: Option<Enc>,
     pub dec: Option<Dec>,
     pub login_acknowledged: bool, // Set true after the Login Acknowledged packet is received from the client.
+    pub client_brand: Option<String>,
 }
 
 impl Connection {
@@ -347,15 +351,26 @@ pub fn handle_connection(stream: TcpStream) {
         .set_nonblocking(false)
         .expect("Failed to set nonblocking false for TcpStream.");
 
+    let peer_addr = match stream.peer_addr() {
+        Ok(peer_addr) => peer_addr,
+        Err(e) => {
+            warn!("Failed to get peer_addr of connection, closing it. e={e}");
+            return;
+        }
+    };
+
     let mut connection = Connection {
         tcp_stream: stream,
         read_stream: ReadStream { data: vec![] },
+        ip_addr: peer_addr.ip(),
+        port: peer_addr.port(),
         state: State::Unset,
         uuid: None,
         username: None,
         enc: None,
         dec: None,
         login_acknowledged: false,
+        client_brand: None,
     };
 
     loop {

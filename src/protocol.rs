@@ -1,10 +1,10 @@
 use crate::{
     byte_helpers::{vec_to_array, IntoBytes},
     connection_handler::handle_packet,
-    identifier::Identifier,
-    info,
+    identifier::{Identifier, MINECRAFT_NAMESPACE},
+    info_connection,
     read_stream::ReadStream,
-    Dec, Enc, ENCRYPTION_INFO,
+    warn_connection, Dec, Enc, ENCRYPTION_INFO,
 };
 use cipher::KeyIvInit;
 use rsa::Pkcs1v15Encrypt;
@@ -160,6 +160,10 @@ pub enum PacketError {
     },
     #[snafu(display("Too many or too little ':' in identifier: '{identifier_raw}'"))]
     IdentifierStrangeColons { identifier_raw: String },
+    #[snafu(display(
+        "Received ServerboundPluginMessage with an unknown namespace: '{namespace}'"
+    ))]
+    ServerboundPluginMessageUnknownNamespace { namespace: String },
 }
 
 pub type Result<T, E = PacketError> = std::result::Result<T, E>;
@@ -221,7 +225,8 @@ impl ServerboundPacket for HandshakePacket {
     }
 
     fn handle(self, connection: &mut Connection) -> Result<()> {
-        info!(
+        info_connection!(
+            connection,
             "Got handshake, they are connecting with {}:{} on protocol version {}, next state is {}.",
             self.server_address,
             self.server_port,
@@ -260,15 +265,15 @@ impl ServerboundPacket for LoginStart {
     }
 
     fn handle(self, connection: &mut Connection) -> Result<()> {
-        info!("Now on LOGIN state.");
+        info_connection!(connection, "Now on LOGIN state.");
 
-        info!("{self:?}");
+        info_connection!(connection, "{self:?}");
         // TODO: Set name & UUID in connection.
 
         connection.write_bytes_force_unencrypted(&ENCRYPTION_INFO.encryption_request_bytes)?;
         connection.flush()?;
 
-        info!("Sent encryption request.");
+        info_connection!(connection, "Sent encryption request.");
 
         Ok(())
     }
@@ -288,7 +293,11 @@ impl ServerboundPacket for PingRequest {
     }
 
     fn handle(self, connection: &mut Connection) -> Result<()> {
-        info!("Got PingRequest with millis: {}", self.sys_time_millis);
+        info_connection!(
+            connection,
+            "Got PingRequest with millis: {}",
+            self.sys_time_millis
+        );
 
         connection.write_bytes(
             PingResponse::to_bytes(PingResponse {
@@ -298,7 +307,8 @@ impl ServerboundPacket for PingRequest {
         )?;
         connection.flush()?;
 
-        info!(
+        info_connection!(
+            connection,
             "Sent back PingResponse with millis: {}",
             self.sys_time_millis
         );
@@ -369,7 +379,10 @@ impl ServerboundPacket for EncryptionResponse {
         connection.enc = Some(enc);
         connection.dec = Some(dec);
 
-        info!("Set encryptor and decryptor, sending Login Success");
+        info_connection!(
+            connection,
+            "Set encryptor and decryptor, sending Login Success"
+        );
 
         // TODO: properties
         connection.write_bytes(
@@ -412,11 +425,28 @@ impl ServerboundPacket for ServerboundPluginMessage {
         Ok(Self { channel, data })
     }
 
-    fn handle(self, _connection: &mut Connection) -> Result<()> {
-        info!("{self:?}");
+    fn handle(self, connection: &mut Connection) -> Result<()> {
+        let channel = self.channel;
+
+        ensure!(
+            channel.namespace() == MINECRAFT_NAMESPACE,
+            ServerboundPluginMessageUnknownNamespaceSnafu {
+                namespace: channel.namespace()
+            }
+        );
 
         let mut data_read_stream = ReadStream { data: self.data };
-        info!("GOT DATA: {}", data_read_stream.read_utf8_string("data")?);
+
+        match channel.value() {
+            "brand" => {
+                let client_brand = data_read_stream.read_utf8_string("client_brand")?;
+                info_connection!(connection, "Client brand is: '{client_brand}'");
+                connection.client_brand = Some(client_brand);
+            }
+            channel_value => {
+                warn_connection!(connection, "Unknown channel value: '{channel_value}' when handling ServerboundPluginMessage");
+            }
+        }
 
         Ok(())
     }

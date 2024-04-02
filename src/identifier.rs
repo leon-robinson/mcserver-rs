@@ -7,6 +7,8 @@ use crate::protocol::{
     PacketError, Result,
 };
 
+pub const MINECRAFT_NAMESPACE: &str = "minecraft";
+
 pub static NAMESPACE_RULES: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-z0-9\.\-_]+$").unwrap());
 pub static VALUE_RULES: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-z0-9\.\-_\/]+$").unwrap());
 
@@ -47,6 +49,16 @@ impl Identifier {
 
         Ok(identifier)
     }
+
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
 }
 
 impl From<Identifier> for String {
@@ -66,7 +78,7 @@ impl TryFrom<String> for Identifier {
 
         match split.len() {
             1 => {
-                namespace = "minecraft".into();
+                namespace = MINECRAFT_NAMESPACE.into();
                 value = split[0].into();
             }
             2 => {

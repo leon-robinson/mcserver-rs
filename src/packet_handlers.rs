@@ -3,12 +3,12 @@
 
 use crate::{
     connection_handler::Connection,
-    info,
+    info_connection,
     protocol::{
         ClientboundPacket, EncryptionResponse, HandshakePacket, LoginStart, PingRequest, Result,
         ServerboundPacket, ServerboundPluginMessage, State, StatusResponse,
     },
-    warn,
+    warn_connection,
 };
 
 // True if should keep connection alive, false if should close the connection.
@@ -43,13 +43,13 @@ fn packet_handler_0x00(connection: &mut Connection, packet_len: usize) -> Result
             connection.write_bytes(packet.as_mut_slice())?;
             connection.flush()?;
 
-            info!("Sent back StatusReponse packet.");
+            info_connection!(connection, "Sent back StatusReponse packet.");
         }
         State::Login => {
             LoginStart::from_connection(connection, packet_len)?.handle(connection)?;
         }
         State::Configuration => {
-            warn!("Got 0x00 packet during State::Configuration");
+            warn_connection!(connection, "Got 0x00 packet during State::Configuration");
         }
     }
 
@@ -70,7 +70,11 @@ fn packet_handler_0x01(connection: &mut Connection, packet_len: usize) -> Result
                 .handle(connection)?;
         }
         _ => {
-            warn!("Got packet_id 0x01 during state: '{}'", connection.state);
+            warn_connection!(
+                connection,
+                "Got packet_id 0x01 during state: '{}'",
+                connection.state
+            );
         }
     };
 
@@ -86,10 +90,13 @@ fn packet_handler_0x03(connection: &mut Connection, _packet_len: usize) -> Resul
         State::Login => {
             connection.login_acknowledged = true;
             connection.state = State::Configuration;
-            info!("Received Login Acknowledged from the client, setting state to Configuration.");
+            info_connection!(
+                connection,
+                "Received Login Acknowledged from the client, setting state to Configuration."
+            );
         }
         _ => {
-            warn!("Got packet 0x03 while not in Login state.");
+            warn_connection!(connection, "Got packet 0x03 while not in Login state.");
         }
     }
     Ok(true)
