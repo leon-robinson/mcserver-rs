@@ -5,8 +5,8 @@ use crate::{
     connection_handler::Connection,
     info_connection,
     protocol::{
-        ClientboundPacket, EncryptionResponse, HandshakePacket, LoginStart, PingRequest, Result,
-        ServerboundPacket, ServerboundPluginMessage, State, StatusResponse,
+        ClientInformation, ClientboundPacket, EncryptionResponse, HandshakePacket, LoginStart,
+        PingRequest, Result, ServerboundPacket, ServerboundPluginMessage, State, StatusResponse,
     },
     warn_connection,
 };
@@ -49,7 +49,7 @@ fn packet_handler_0x00(connection: &mut Connection, packet_len: usize) -> Result
             LoginStart::from_connection(connection, packet_len)?.handle(connection)?;
         }
         State::Configuration => {
-            warn_connection!(connection, "Got 0x00 packet during State::Configuration");
+            ClientInformation::from_connection(connection, packet_len)?.handle(connection)?;
         }
     }
 

@@ -10,7 +10,7 @@ use crate::crypto::{decrypt_inout, encrypt_inout};
 use crate::identifier::Identifier;
 use crate::protocol::PacketSizeBelowZeroSnafu;
 use crate::protocol::UnknownPacketIDSnafu;
-use crate::protocol::{BadI32ToUsizeConversionSnafu, BadU8ReadSnafu};
+use crate::protocol::{BadI32ToUsizeConversionSnafu, BadU8ReadSnafu, ClientInformation};
 use crate::protocol::{BadPacketHandlerReadsSnafu, PacketIDBelowZeroSnafu};
 use crate::protocol::{BadUsizeToI32ConversionSnafu, VarIntTooLargeSnafu};
 use crate::read_stream::ReadStream;
@@ -30,12 +30,14 @@ pub struct Connection {
     pub ip_addr: IpAddr,
     pub port: u16,
     pub state: State,
+    pub login_acknowledged: bool, // Set true after the Login Acknowledged packet is received from the client.
+    // Many of the following fields are optional as they are from packets that are not required to be sent by the client.
     pub uuid: Option<Uuid>, // None if we are in the Handshake stage or it's a ping connection.
     pub username: Option<String>, // None if we are in the Handshake stage or it's a ping connection.
-    pub enc: Option<Enc>,
-    pub dec: Option<Dec>,
-    pub login_acknowledged: bool, // Set true after the Login Acknowledged packet is received from the client.
-    pub client_brand: Option<String>,
+    pub enc: Option<Enc>,         // None if encryption is not yet enabled.
+    pub dec: Option<Dec>,         // None if encryption is not yet enabled.
+    pub client_brand: Option<String>, // Client brand as reported by the client.
+    pub client_information: Option<ClientInformation>, // The last ClientInformation packet recieved from the client.
 }
 
 impl Connection {
@@ -150,6 +152,12 @@ impl Connection {
         field_name: &'static str,
     ) -> Result<(Identifier, i32)> {
         self.read_stream.read_identifier_and_len(field_name)
+    }
+
+    /// Read the first `bool` from the `ReadStream`
+    #[inline]
+    pub fn read_bool(&mut self, field_name: &'static str) -> Result<bool> {
+        Ok(self.read_u8(field_name)? != 0x00)
     }
 
     #[inline]
@@ -371,6 +379,7 @@ pub fn handle_connection(stream: TcpStream) {
         dec: None,
         login_acknowledged: false,
         client_brand: None,
+        client_information: None,
     };
 
     loop {

@@ -85,10 +85,11 @@ pub enum PacketError {
     VarIntTooLarge { field_name: &'static str },
     #[snafu(display("VarInt was too large"))]
     VarLongTooLarge { field_name: &'static str },
-    #[snafu(display("Invalid connection Status: '{status}'"))]
-    InvalidStatus {
+    #[snafu(display("Invalid enum index: '{index}' for enum: '{enum_name}'"))]
+    InvalidEnumIndex {
         source: EnumBoundsError,
-        status: i32,
+        index: i32,
+        enum_name: &'static str,
     },
     #[snafu(display("Failed to flush in TcpStream"))]
     FailedToFlushStream { source: std::io::Error },
@@ -188,12 +189,70 @@ pub trait ClientboundPacket: Sized {
 }
 
 back_to_enum! {
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum State {
         Configuration = -1, // No value correlates with the Configuration state, so set it to -1.
         Unset = 0, // Not actually in the Minecraft protocol, just means that the Handshake has not been sent by the client yet.
         Status = 1,
         Login = 2,
+    }
+}
+
+back_to_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ChatMode {
+        Enabled = 0,
+        CommandsOnly = 1,
+        Hidden = 2,
+    }
+}
+
+back_to_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Hand {
+        Left = 0,
+        Right = 1,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayedSkinParts(u8);
+
+#[allow(dead_code)]
+impl DisplayedSkinParts {
+    #[inline]
+    fn cape_enabled(self) -> bool {
+        self.0 & 0b0000_0001 != 0
+    }
+
+    #[inline]
+    fn jacked_enabled(self) -> bool {
+        self.0 & 0b0000_0010 != 0
+    }
+
+    #[inline]
+    fn left_sleeve_enabled(self) -> bool {
+        self.0 & 0b0000_0100 != 0
+    }
+
+    #[inline]
+    fn right_sleeve_enabled(self) -> bool {
+        self.0 & 0b0000_1000 != 0
+    }
+
+    #[inline]
+    fn left_pants_leg_enabled(self) -> bool {
+        self.0 & 0b0001_0000 != 0
+    }
+
+    #[inline]
+    fn right_pants_leg_enabled(self) -> bool {
+        self.0 & 0b0010_0000 != 0
+    }
+
+    #[inline]
+    fn hat_enabled(self) -> bool {
+        self.0 & 0b0100_0000 != 0
     }
 }
 
@@ -212,9 +271,10 @@ impl ServerboundPacket for HandshakePacket {
         let server_address = connection.read_utf8_string("server_address")?;
         let server_port = connection.read_u16("server_port")?;
         let next_state = connection.read_var_int("next_state")?;
-        let next_state = next_state
-            .try_into()
-            .context(InvalidStatusSnafu { status: next_state })?;
+        let next_state = next_state.try_into().context(InvalidEnumIndexSnafu {
+            index: next_state,
+            enum_name: "State",
+        })?;
 
         Ok(Self {
             protocol_version,
@@ -448,6 +508,61 @@ impl ServerboundPacket for ServerboundPluginMessage {
             }
         }
 
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ClientInformation {
+    pub locale: String,                           // Locale reported by client.
+    pub view_distance: u8,                        // View distance reported by client.
+    pub chat_mode: ChatMode,                      // Chat mode reported by client.
+    pub chat_colors: bool,                        // Whether the chat can be colored.
+    pub displayed_skin_parts: DisplayedSkinParts, // What parts of the skin are enabled.
+    pub main_hand: Hand,                          // Player's main hand (Left, Right).
+    pub enable_text_filtering: bool, // Enables filtering of text on signs and written titles, currently always false.
+    pub allow_server_listings: bool, // True when the player does not want to be shown on the online players list.
+}
+
+impl ServerboundPacket for ClientInformation {
+    fn from_connection(connection: &mut Connection, _packet_len: usize) -> Result<Self> {
+        let locale = connection.read_utf8_string("locale")?;
+        let view_distance = connection.read_u8("view_distance")?;
+        let chat_mode = connection.read_var_int("chat_mode")?;
+        let chat_mode = ChatMode::try_from(chat_mode).context(InvalidEnumIndexSnafu {
+            index: chat_mode,
+            enum_name: "ChatMode",
+        })?;
+        let chat_colors = connection.read_bool("chat_colors")?;
+        let displayed_skin_parts = DisplayedSkinParts(connection.read_u8("displayed_skin_parts")?);
+        let main_hand = connection.read_var_int("main_hand")?;
+        let main_hand = Hand::try_from(main_hand).context(InvalidEnumIndexSnafu {
+            index: main_hand,
+            enum_name: "MainHand",
+        })?;
+        let enable_text_filtering = connection.read_bool("enable_text_filtering")?;
+        let allow_server_listings = connection.read_bool("allow_server_listings")?;
+
+        Ok(Self {
+            locale,
+            view_distance,
+            chat_mode,
+            chat_colors,
+            displayed_skin_parts,
+            main_hand,
+            enable_text_filtering,
+            allow_server_listings,
+        })
+    }
+
+    fn handle(self, connection: &mut Connection) -> Result<()> {
+        connection.client_information = Some(self);
+        info_connection!(
+            connection,
+            "Received ClientInformation: {:?}",
+            connection.client_information
+        );
         Ok(())
     }
 }
